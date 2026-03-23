@@ -173,7 +173,7 @@ def draw_gauge(val, max_val, title, color):
     return fig
 
 # ==========================================
-# 🔄 全域同步函數 (整合儀表板與帳本)
+# 🔄 全域同步函數 
 # ==========================================
 def sync_global_data(style):
     with st.spinner('📡 正在同步雲端金庫與大盤數據...'):
@@ -218,7 +218,7 @@ def sync_global_data(style):
         st.session_state.market_fetched = True
 
 # ==========================================
-# ⚙️ 左側邊欄設定
+# ⚙️ 左側邊欄設定 (★ 完美修復文字與符號)
 # ==========================================
 st.sidebar.title(f"👤 歡迎回來，{st.session_state['username']}！")
 st.sidebar.metric("🏦 雲端可用現金", f"${st.session_state['cash_balance']:,.0f}")
@@ -228,11 +228,9 @@ st.sidebar.markdown("---")
 st.sidebar.title("🧠 核心交易流派選擇")
 trade_style = st.sidebar.radio("請選擇您的操作信仰：", ["📈 順勢動能 (右側交易)", "🛒 價值抄底 (左側交易)"])
 
-# ★ 全域同步按鈕移至側邊欄
 if st.sidebar.button("🔄 同步雲端大盤與帳本", type="primary", use_container_width=True):
     sync_global_data(trade_style)
 
-# 系統啟動時自動同步一次
 if not st.session_state.market_fetched: sync_global_data(trade_style)
 
 st.sidebar.markdown("---")
@@ -240,22 +238,28 @@ sidebar_trade_container = st.sidebar.container()
 st.sidebar.markdown("---")
 
 st.sidebar.title("⚙️ 策略參數控制台")
-show_trade_lines = st.sidebar.checkbox("開啟【買賣區間透視方塊】", value=True)
-use_adx_filter = st.sidebar.checkbox("開啟【ADX 趨勢過濾】", value=True)
-cooldown_days = st.sidebar.slider("訊號冷卻天數", 1, 10, 5)
-safe_bias_limit = st.sidebar.slider("安全乖離率上限 (%)", 1.0, 15.0, 5.0)
-use_breakout = st.sidebar.checkbox("開啟【壓縮突破】(桃紅)", value=True)
-bbw_factor = st.sidebar.slider("└ 布林壓縮容錯", 1.0, 1.5, 1.1)
-vol_factor = st.sidebar.slider("└ 成交爆發倍數", 1.0, 3.0, 1.5)
-use_pullback = st.sidebar.checkbox("開啟【多頭拉回】(綠色)", value=False)
+show_trade_lines = st.sidebar.checkbox("開啟【買賣區間透視方塊】(圖表顯示報酬)", value=True)
+use_adx_filter = st.sidebar.checkbox("開啟【ADX 趨勢過濾】(過濾盤整雜訊)", value=True)
+cooldown_days = st.sidebar.slider("訊號冷卻天數 (建議：5天)", 1, 10, 5)
+safe_bias_limit = st.sidebar.slider("進場安全乖離率上限 (%) (建議：5.0)", 1.0, 15.0, 5.0)
+
+st.sidebar.markdown("---")
+st.sidebar.subheader("🎯 買點設定 (向上箭頭 ▲)")
+use_breakout = st.sidebar.checkbox("開啟【壓縮突破】買點 (桃紅 ▲)", value=True)
+bbw_factor = st.sidebar.slider("└ 布林壓縮容錯率", 1.0, 1.5, 1.1)
+vol_factor = st.sidebar.slider("└ 成交量爆發倍數", 1.0, 3.0, 1.5)
+use_pullback = st.sidebar.checkbox("開啟【多頭拉回】買點 (綠色 ▲)", value=False)
 kd_threshold = st.sidebar.slider("└ KD 金叉最高位階", 20, 80, 50)
-use_ma_bounce = st.sidebar.checkbox("開啟【20MA 回踩】(淺藍)", value=True)
-use_5ma_bounce = st.sidebar.checkbox("開啟【5MA 回踩】(黃色)", value=False)
-use_sell_5ma = st.sidebar.checkbox("開啟【跌破 5MA】", value=False)
-use_sell_kd = st.sidebar.checkbox("開啟【KD 高檔死叉】", value=False)
-use_sell_rsi = st.sidebar.checkbox("開啟【RSI 跌破 70】", value=False)
-use_sell_macd = st.sidebar.checkbox("開啟【MACD 死叉】", value=True)
-use_sell_ma = st.sidebar.checkbox("開啟【跌破 20MA】", value=True)
+use_ma_bounce = st.sidebar.checkbox("開啟【20MA 回踩】波段買點 (淺藍 ▲)", value=True)
+use_5ma_bounce = st.sidebar.checkbox("開啟【5MA 回踩】飆股買點 (黃色 ▲)", value=False)
+
+st.sidebar.markdown("---")
+st.sidebar.subheader("🛑 賣點設定 (向下箭頭 ▼)")
+use_sell_5ma = st.sidebar.checkbox("開啟【跌破 5MA】極短線停利 (紅色 ▼)", value=False)
+use_sell_kd = st.sidebar.checkbox("開啟【KD 高檔死叉】短線停利 (橘色 ▼)", value=False)
+use_sell_rsi = st.sidebar.checkbox("開啟【RSI 跌破 70】過熱出場 (紫色 ▼)", value=False)
+use_sell_macd = st.sidebar.checkbox("開啟【MACD 死叉】波段轉弱 (深藍 ▼)", value=True)
+use_sell_ma = st.sidebar.checkbox("開啟【跌破 20MA】波段停損 (黑色 ▼)", value=True)
 
 # ==========================================
 # 🗂️ 建立分頁
@@ -263,7 +267,7 @@ use_sell_ma = st.sidebar.checkbox("開啟【跌破 20MA】", value=True)
 tab1, tab2, tab3, tab4 = st.tabs(["📊 個股分析與配速", "🚀 策略選股掃描器", "💰 策略回測實驗室", "⚖️ 金庫與大盤儀表板"])
 
 # ------------------------------------------
-# 分頁一：個股詳細分析 (★ 升級智能配速與分批建倉)
+# 分頁一：個股詳細分析 (★ 升級智能動態資金配速器)
 # ------------------------------------------
 with tab1:
     ticker_input_raw = st.text_input("🔍 請輸入要分析的股票代碼", value="2330.TW")
@@ -277,7 +281,7 @@ with tab1:
         latest, prev = df.iloc[-1], df.iloc[-2]
         
         # ==========================================
-        # ★ 智能資金配速器 (Pacing & Sizing)
+        # ★ AI 智能資金配速器 (Dynamic Pacing)
         # ==========================================
         st.markdown(f"### 🧮 智能資金配速與建倉計算機 ({'📈 順勢動能' if '順勢' in trade_style else '🛒 價值抄底'}模型)")
         
@@ -288,26 +292,40 @@ with tab1:
         gap_amt = total_equity * gap_pct
 
         if gap_amt <= 0:
-            st.error(f"🚨 **資金水位已滿！** 目前庫存 {current_pct*100:.1f}% 已超過大盤建議水位 {target_pct*100:.1f}%。建議今日【調節減碼】，不宜建倉！")
+            st.error(f"🚨 **資金水位已滿！** 目前庫存 {current_pct*100:.1f}% 已達大盤建議水位 {target_pct*100:.1f}%。建議今日【調節減碼】，不宜建倉！")
             recommended_shares = 0
         else:
-            st.info(f"💡 **目前資金缺口：** 距離大盤建議水位還有 **{gap_pct*100:.1f}%** 的空間，總計可動用資金約 **${gap_amt:,.0f}**。")
+            st.info(f"💡 **目前總資金缺口：** 距離大盤滿水位還有 **{gap_pct*100:.1f}%** 空間，可動用總預算約 **${gap_amt:,.0f}**。")
             
-            col_p1, col_p2, col_p3 = st.columns(3)
-            with col_p1:
-                days_to_deploy = st.slider("📅 預計分幾天補足缺口？(建倉節奏)", min_value=1, max_value=10, value=3, help="將資金缺口平滑分散到數天，降低單日擇時風險。")
-            with col_p2:
-                num_stocks_today = st.slider("🛒 今日預計買進幾檔股票？", min_value=1, max_value=10, value=2, help="將今日預算平均分配給預計買進的檔數。")
-            with col_p3:
-                risk_pct = st.slider("⚠️ 單筆最大虧損容忍度 (%)", min_value=0.5, max_value=5.0, value=2.0, step=0.5)
-
-            # 1. 預算限制計算
-            today_budget = gap_amt / days_to_deploy
-            per_stock_budget = today_budget / num_stocks_today
+            # --- 系統自動判斷建倉天數 ---
+            status = latest['Status_Signal']
+            rsi = latest['RSI']
             entry_price = latest['Close']
+            
+            if "順勢" in trade_style:
+                if "極度危險" in status: pacing_days = 10; pacing_reason = "🔴 個股處於極度危險過熱區，強烈建議放緩建倉節奏 (分為 10 天投入)。"
+                elif "留意拉回" in status: pacing_days = 5; pacing_reason = "🟡 個股動能偏高，有拉回風險，建議適度分散 (分為 5 天投入)。"
+                elif "安全區間" in status: pacing_days = 2; pacing_reason = "🟢 個股處於安全起漲區，動能良好，建議加速建倉 (分為 2 天投入)。"
+                else: pacing_days = 5; pacing_reason = "⚫ 趨勢偏弱，保守配速 (分為 5 天投入)。"
+            else: # 價值模式
+                if rsi < 30 or entry_price < latest['Lower_Band']: pacing_days = 1; pacing_reason = "🔴 極度恐慌區！價值嚴重低估，建議「一波重壓」(1 天內打滿預算)！"
+                elif rsi < 40 or entry_price < latest['SMA_60']: pacing_days = 3; pacing_reason = "🟡 跌深反彈區，價值浮現，建議「積極分批」(分為 3 天投入)。"
+                else: pacing_days = 5; pacing_reason = "🟢 未達極度恐慌標準，建議「保守試水溫」(分為 5 天投入)。"
+
+            st.markdown(f"#### ⏱️ 系統智能配速判定：**今日起分為 {pacing_days} 天建倉**")
+            st.caption(f"🤖 判定邏輯：{pacing_reason}")
+            
+            col_p2, col_p3 = st.columns(2)
+            with col_p2:
+                num_stocks_today = st.slider("🛒 今日預計總共買進幾檔股票？", 1, 10, 2, help="系統會將今天的配速額度，平均分給您預計買進的檔數。")
+            with col_p3:
+                risk_pct = st.slider("⚠️ 單筆最大虧損容忍度 (%)", 0.5, 5.0, 2.0, 0.5)
+
+            # 精算單檔預算
+            today_budget = gap_amt / pacing_days
+            per_stock_budget = today_budget / num_stocks_today
             shares_by_budget = int(per_stock_budget // entry_price)
 
-            # 2. 風險限制計算
             risk_amount = total_equity * (risk_pct / 100.0)
             if "順勢" in trade_style:
                 stop_loss_price = latest['SMA_20']
@@ -315,12 +333,11 @@ with tab1:
                     risk_per_share = entry_price - stop_loss_price
                     shares_by_risk = int(risk_amount // risk_per_share)
                     recommended_shares = min(shares_by_budget, shares_by_risk)
-                    st.success(f"🎯 **最終建議買進： {recommended_shares:,.0f} 股** (單檔預算上限: ${per_stock_budget:,.0f})")
+                    st.success(f"🎯 **結合配速與風險，單檔建議買進： {recommended_shares:,.0f} 股** (單檔預算上限: ${per_stock_budget:,.0f})")
                 else: 
                     st.warning("🚨 股價低於 20MA，順勢防守機制啟動，建議：【空手觀望，0 股】！")
                     recommended_shares = 0
             else:
-                # 價值抄底
                 assumed_risk = entry_price * 0.10 
                 shares_by_risk = int(risk_amount // assumed_risk)
                 max_shares = min(shares_by_budget, shares_by_risk)
@@ -329,13 +346,10 @@ with tab1:
                     st.warning("⚖️ 股價在月線之上，無特價空間。建議：【耐心等待回檔，0 股】")
                     recommended_shares = 0
                 else:
-                    if latest['RSI'] < 30 or entry_price < latest['Lower_Band']: weight = 1.0; tier = "🔴 極度恐慌區 (重倉)"
-                    elif latest['RSI'] < 40 or entry_price < latest['SMA_60']: weight = 0.5; tier = "🟡 跌深反彈區 (加碼)"
-                    else: weight = 0.2; tier = "🟢 初步回檔區 (試單)"
-                    
+                    weight = 1.0 if pacing_days == 1 else (0.5 if pacing_days == 3 else 0.2)
                     recommended_shares = int(max_shares * weight)
-                    st.success(f"🛒 **{tier}** -> 最終建議買進： **{recommended_shares:,.0f} 股**")
-                    st.caption(f"單檔最高預算 ${per_stock_budget:,.0f} x 左側建倉權重 {weight*100}% = 本次動用 ${recommended_shares * entry_price:,.0f}")
+                    st.success(f"🛒 **左側抄底模型** -> 結合配速，建議買進： **{recommended_shares:,.0f} 股**")
+                    st.caption(f"單檔預算 ${per_stock_budget:,.0f} x 左側權重 {weight*100}% = 本次動用 ${recommended_shares * entry_price:,.0f}")
             
         st.markdown("---")
 
