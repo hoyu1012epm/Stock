@@ -399,9 +399,6 @@ with tab1:
         if use_sell_macd: fig.add_trace(go.Scatter(x=df[df['Sell_MACD']].index, y=df.loc[df['Sell_MACD'], 'High'] + df.loc[df['Sell_MACD'], 'ATR_14']*1.6, mode='markers', marker=dict(symbol='triangle-down', size=12, color='blue', line=dict(width=1, color='black'))), row=1, col=1)
         if use_sell_ma: fig.add_trace(go.Scatter(x=df[df['Sell_MA20']].index, y=df.loc[df['Sell_MA20'], 'High'] + df.loc[df['Sell_MA20'], 'ATR_14']*2.0, mode='markers', marker=dict(symbol='triangle-down', size=13, color='black', line=dict(width=1, color='black'))), row=1, col=1)
 
-        # ==========================================
-        # ★ 完美修復：動態連動左側打勾，並套用台股「紅賺綠賠」配色
-        # ==========================================
         if show_trade_lines:
             df['CBuy'] = False
             if use_breakout: df['CBuy'] |= df['Buy_Breakout']
@@ -422,7 +419,6 @@ with tab1:
                 elif pos == 1 and df['CSell'].iloc[i]:
                     pos, xp = 0, df['Close'].iloc[i]
                     ret = (xp - ep)/ep * 100
-                    # 台股顏色：賺錢(紅色), 賠錢(綠色)
                     lc, fc, bg = ("rgba(255,0,0,0.8)", "rgba(255,0,0,0.15)", "red") if ret > 0 else ("rgba(0,200,0,0.8)", "rgba(0,200,0,0.15)", "green")
                     fig.add_shape(type="rect", x0=ed, y0=ep, x1=df.index[i], y1=xp, fillcolor=fc, line=dict(color=lc, width=2), row=1, col=1)
                     fig.add_annotation(x=df.index[i], y=df['High'].iloc[i] + df['ATR_14'].iloc[i]*2.8, text=f"<b>{xp-ep:.2f} ({ret:.1f}%)</b>", showarrow=True, arrowhead=1, arrowcolor=lc, ax=0, ay=-30, font=dict(color="white", size=11), bgcolor=bg, row=1, col=1)
@@ -437,14 +433,69 @@ with tab1:
         fig.add_trace(go.Scatter(x=df.index, y=df['Signal'], line=dict(color='purple')), row=4, col=1)
         fig.add_trace(go.Scatter(x=df.index, y=df['RSI'], line=dict(color='darkred')), row=5, col=1)
         fig.add_trace(go.Scatter(x=df.index, y=df['OBV'], line=dict(color='teal')), row=6, col=1)
+        
+        # ★ 修復：加入 config={'scrollZoom': True} 讓滾輪可以縮放
         fig.update_layout(height=1300, hovermode="x unified", dragmode='pan', showlegend=False, xaxis_rangeslider_visible=False)
         dt_breaks = [d.strftime("%Y-%m-%d") for d in pd.date_range(start=df.index[0], end=df.index[-1]) if d not in df.index]
         fig.update_xaxes(range=[df.index[-1] - pd.Timedelta(days=150), df.index[-1] + pd.Timedelta(days=10)], rangebreaks=[dict(values=dt_breaks)])
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, use_container_width=True, config={'scrollZoom': True})
     else:
         st.warning("⚠️ 找不到該股票代碼，請確認代碼是否正確。")
 
-with tab2: st.info("🚀 掃描器運作中...")
+# ------------------------------------------
+# 分頁二：🚀 策略選股掃描器 (強勢回歸)
+# ------------------------------------------
+with tab2:
+    st.header("🚀 策略選股掃描器")
+    st.markdown("系統將依照您左側邊欄勾選的 **【買點設定】**，自動從您的口袋名單中篩選出今天(最新交易日)剛好觸發買訊的股票！")
+    
+    # 預設 20 大權值股作為範例清單
+    default_tickers = "2330.TW, 2317.TW, 2454.TW, 2382.TW, 2308.TW, 2881.TW, 2891.TW, 2412.TW, 2882.TW, 2886.TW, 1216.TW, 2002.TW, 2884.TW, 2892.TW, 2603.TW, 2303.TW, 2885.TW, 3231.TW, 1101.TW, 2890.TW"
+    scan_tickers_input = st.text_area("📝 請輸入要掃描的股票代碼 (以半形逗號分隔，支援 .TW 或 .TWO)", value=default_tickers)
+    
+    if st.button("⚡ 開始全盤掃描", type="primary"):
+        ticker_list = [t.strip().upper() for t in scan_tickers_input.split(",")]
+        scan_results = []
+        
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        for i, ticker in enumerate(ticker_list):
+            status_text.text(f"正在掃描: {ticker} ({i+1}/{len(ticker_list)})...")
+            try:
+                # 掃描不需要抓 5 年，抓 200 天夠算季線與 ADX 就好，加速掃描
+                df_scan = load_data(ticker, days=200) 
+                if not df_scan.empty:
+                    df_scan = calculate_indicators(df_scan, bbw_factor, vol_factor, kd_threshold, use_adx_filter, cooldown_days, safe_bias_limit)
+                    latest_day = df_scan.iloc[-1]
+                    
+                    buy_reasons = []
+                    if use_breakout and latest_day.get('Buy_Breakout', False): buy_reasons.append("壓縮突破")
+                    if use_pullback and latest_day.get('Buy_Pullback', False): buy_reasons.append("多頭拉回")
+                    if use_ma_bounce and latest_day.get('Buy_MABounce', False): buy_reasons.append("20MA回踩")
+                    if use_5ma_bounce and latest_day.get('Buy_5MABounce', False): buy_reasons.append("5MA回踩")
+                    
+                    if buy_reasons:
+                        scan_results.append({
+                            "股票代碼": ticker,
+                            "最新收盤價": round(latest_day['Close'], 2),
+                            "今日觸發策略": " + ".join(buy_reasons),
+                            "趨勢判定": latest_day['Status_Signal'],
+                            "RSI (14)": round(latest_day['RSI'], 1),
+                            "月線乖離(%)": round(latest_day['Bias_20MA'], 2)
+                        })
+            except Exception as e:
+                pass
+            progress_bar.progress((i + 1) / len(ticker_list))
+            
+        status_text.text("✅ 掃描完成！")
+        
+        if scan_results:
+            st.success(f"🎉 恭喜！在您的清單中共掃描出 {len(scan_results)} 檔符合【左側策略】的飆股。")
+            st.dataframe(pd.DataFrame(scan_results), use_container_width=True)
+        else:
+            st.warning("🥲 今天沒有任何股票符合您目前的買點設定，請調整左側參數，或加入更多股票代碼。")
+
 with tab3: st.info("💰 回測實驗室運作中...")
 
 # ------------------------------------------
