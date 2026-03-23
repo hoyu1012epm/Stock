@@ -309,7 +309,6 @@ with tab4:
     
     if st.button("🔄 刷新雲端帳本與大盤數據", type="primary"):
         with st.spinner('正在分析大盤四大指標與雲端金庫...'):
-            # 1. 抓取大盤與 VIX (四大指標)
             twii = load_data("^TWII", days=100)
             vix = load_data("^VIX", days=30)
             
@@ -319,19 +318,30 @@ with tab4:
                 tw_last = twii.iloc[-1]
                 vix_last = vix['Close'].iloc[-1] if not vix.empty else 20
                 
-                # 指標 1: 季線趨勢 (40%)
-                s_trend = 40 if tw_last['Close'] > tw_last['SMA_60'] else 0
-                # 指標 2: 月線動能 (20%)
-                s_mom = 20 if tw_last['Close'] > tw_last['SMA_20'] else 0
-                # 指標 3: 乖離過熱度 (20%)
-                bias = ((tw_last['Close'] - tw_last['SMA_20']) / tw_last['SMA_20']) * 100
-                s_bias = 0 if bias >= 5 else (20 if bias <= -5 else 10)
-                # 指標 4: VIX 恐慌情緒 (20%)
-                s_vix = 20 if vix_last < 20 else (10 if vix_last < 30 else 0)
+                # ★ 升級為線性平滑演算法 (精準到小數點第一位)
+                # 1. 季線趨勢 (Max 40): 依據季線乖離率 -5% ~ +5% 線性給分
+                bias_60 = ((tw_last['Close'] - tw_last['SMA_60']) / tw_last['SMA_60']) * 100
+                s_trend = float(np.clip(40 * (bias_60 + 5) / 10, 0, 40))
                 
-                st.session_state.market_scores = {'trend': s_trend, 'mom': s_mom, 'bias': s_bias, 'vix': s_vix, 'total': s_trend + s_mom + s_bias + s_vix}
+                # 2. 月線動能 (Max 20): 依據月線乖離率 -3% ~ +3% 線性給分
+                bias_20 = ((tw_last['Close'] - tw_last['SMA_20']) / tw_last['SMA_20']) * 100
+                s_mom = float(np.clip(20 * (bias_20 + 3) / 6, 0, 20))
+                
+                # 3. 乖離過熱度 (反向指標, Max 20): 月線乖離 -5%(超跌拿滿分) ~ +5%(過熱拿0分)
+                s_bias = float(np.clip(20 - (20 * (bias_20 + 5) / 10), 0, 20))
+                
+                # 4. VIX 恐慌指數 (反向指標, Max 20): VIX 15(平靜拿滿分) ~ 35(恐慌拿0分)
+                s_vix = float(np.clip(20 - (20 * (vix_last - 15) / 20), 0, 20))
+                
+                total_score = round(s_trend + s_mom + s_bias + s_vix, 1)
+                
+                st.session_state.market_scores = {
+                    'trend': round(s_trend, 1), 'mom': round(s_mom, 1), 
+                    'bias': round(s_bias, 1), 'vix': round(s_vix, 1), 
+                    'total': total_score
+                }
             
-            # 2. 抓取庫存並計算現值
+            # 抓取庫存並計算現值
             ws_holdings = sh.worksheet("Holdings")
             all_holdings = pd.DataFrame(ws_holdings.get_all_records())
             
@@ -362,22 +372,22 @@ with tab4:
                 
             st.session_state.market_fetched = True
 
-    # ================= 顯示儀表板 (需點擊刷新後顯示) =================
+    # ================= 顯示儀表板 =================
     if st.session_state.market_fetched:
-        st.markdown("### 🌦️ 大盤氣象台 (四大指標分析)")
+        st.markdown("### 🌦️ 大盤氣象台 (動態線性指標)")
         ms = st.session_state.market_scores
         
-        # 繪製 4 個小儀表板
+        # 動態顏色判斷：高於滿分的 80% 顯示綠色，低於 40% 顯示紅色，其餘黃色
+        def get_color(val, max_val):
+            if val >= max_val * 0.8: return "limegreen"
+            elif val <= max_val * 0.4: return "crimson"
+            else: return "gold"
+
         col_g1, col_g2, col_g3, col_g4 = st.columns(4)
-        c_trend = "limegreen" if ms['trend'] == 40 else "crimson"
-        c_mom = "limegreen" if ms['mom'] == 20 else "crimson"
-        c_bias = "limegreen" if ms['bias'] == 20 else ("gold" if ms['bias'] == 10 else "crimson")
-        c_vix = "limegreen" if ms['vix'] == 20 else ("gold" if ms['vix'] == 10 else "crimson")
-        
-        with col_g1: st.plotly_chart(draw_gauge(ms['trend'], 40, "季線趨勢 (滿分40%)", c_trend), use_container_width=True)
-        with col_g2: st.plotly_chart(draw_gauge(ms['mom'], 20, "月線動能 (滿分20%)", c_mom), use_container_width=True)
-        with col_g3: st.plotly_chart(draw_gauge(ms['bias'], 20, "乖離過熱度 (滿分20%)", c_bias), use_container_width=True)
-        with col_g4: st.plotly_chart(draw_gauge(ms['vix'], 20, "VIX 恐慌指數 (滿分20%)", c_vix), use_container_width=True)
+        with col_g1: st.plotly_chart(draw_gauge(ms['trend'], 40, "季線趨勢 (滿分40%)", get_color(ms['trend'], 40)), use_container_width=True)
+        with col_g2: st.plotly_chart(draw_gauge(ms['mom'], 20, "月線動能 (滿分20%)", get_color(ms['mom'], 20)), use_container_width=True)
+        with col_g3: st.plotly_chart(draw_gauge(ms['bias'], 20, "乖離過熱度 (滿分20%)", get_color(ms['bias'], 20)), use_container_width=True)
+        with col_g4: st.plotly_chart(draw_gauge(ms['vix'], 20, "VIX 恐慌指數 (滿分20%)", get_color(ms['vix'], 20)), use_container_width=True)
         
         # 資金水位計算
         total_equity = st.session_state["cash_balance"] + st.session_state.total_mkt_val
@@ -388,7 +398,7 @@ with tab4:
         col_r1, col_r2, col_r3 = st.columns(3)
         col_r1.metric("總資產淨值 (現金+股票)", f"${total_equity:,.0f}")
         col_r2.metric("目前持股水位", f"{current_pct:.1f}%")
-        col_r3.metric("🎯 系統建議大盤持股水位", f"{suggested_pct}%")
+        col_r3.metric("🎯 系統動態建議水位", f"{suggested_pct}%")
         
         diff_pct = current_pct - suggested_pct
         if diff_pct > 5: st.error(f"🚨 **持股過高！** 建議賣出約 ${total_equity * (diff_pct/100):,.0f} 變現。")
@@ -402,21 +412,17 @@ with tab4:
         df_h = st.session_state.user_holdings
         
         if not df_h.empty:
-            # ★ 視角切換器
             view_mode = st.radio("👀 請選擇檢視模式：", ["📊 彙總視角 (按股票代碼合併計算)", "📝 明細視角 (逐筆交易紀錄)"], horizontal=True)
             
             if "彙總" in view_mode:
-                # 執行群組彙總計算
                 summary = df_h.groupby('Ticker').agg({
                     'Shares': 'sum',
                     'Total_Cost': 'sum',
-                    '目前股價': 'first' # 同一檔股票目前市價一樣
+                    '目前股價': 'first'
                 }).reset_index()
                 summary['平均成本價'] = (summary['Total_Cost'] / summary['Shares']).round(2)
                 summary['目前總市值'] = (summary['Shares'] * summary['目前股價']).round(0)
                 summary['總未實現損益 (%)'] = (((summary['目前股價'] - summary['平均成本價']) / summary['平均成本價']) * 100).round(2)
-                
-                # 重新排序欄位讓畫面好看
                 summary = summary[['Ticker', 'Shares', '平均成本價', '目前股價', 'Total_Cost', '目前總市值', '總未實現損益 (%)']]
                 st.dataframe(summary, use_container_width=True)
             else:
