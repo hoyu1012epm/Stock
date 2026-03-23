@@ -18,7 +18,7 @@ st.set_page_config(page_title="專屬量化操盤副駕 | 雲端金庫版", layo
 @st.cache_resource(ttl=3600)
 def init_connection():
     try:
-        # ★ 終極防禦：加入 strict=False，強迫系統讀懂包含換行符號的 Google 密碼！
+        # 終極防禦：加入 strict=False，強迫系統讀懂包含換行符號的密碼
         raw_json = st.secrets["GOOGLE_JSON"]
         creds_json = json.loads(raw_json, strict=False) 
         
@@ -97,7 +97,7 @@ if not st.session_state["logged_in"]:
                 else:
                     ws_users.append_row([sign_user, sign_pwd, init_cap, init_cap])
                     st.success("🎉 註冊成功！請切換到「登入」分頁進入系統。")
-    st.stop() # 阻擋未登入者看到下面的程式碼
+    st.stop() 
 
 # ==========================================
 # ⚙️ 登入後主程式開始
@@ -259,7 +259,7 @@ def calculate_indicators_and_signals(df, bbw_f, vol_f, kd_thresh, use_adx, coold
 tab1, tab2, tab3, tab4 = st.tabs(["📊 個股詳細分析", "🚀 策略選股掃描器", "💰 策略回測實驗室", "⚖️ 雲端金庫與再平衡"])
 
 # ------------------------------------------
-# 分頁一：個股詳細分析 (連結雲端資金)
+# 分頁一：個股詳細分析 (包含彈性建倉系統)
 # ------------------------------------------
 with tab1:
     ticker_input_raw = st.text_input("🔍 請輸入要分析的股票代碼", value="2330.TW", key="tab1_input")
@@ -301,15 +301,16 @@ with tab1:
                     ret = (exit_p - entry_p) / entry_p * 100
                     diff = exit_p - entry_p 
                     trades_viz.append({
-                        'buy_date': entry_d, 'buy_price': entry_p, 
-                        'sell_date': exit_d, 'sell_price': exit_p, 
-                        'return': ret, 'diff': diff, 'sell_high': df['High'].iloc[i], 'atr': df['ATR_14'].iloc[i]
+                        'buy_date': entry_d, 'buy_price': entry_p, 'sell_date': exit_d, 'sell_price': exit_p, 'return': ret, 'diff': diff, 'sell_high': df['High'].iloc[i], 'atr': df['ATR_14'].iloc[i]
                     })
 
         latest = df.iloc[-1]
         prev = df.iloc[-2]
         
-        st.markdown("### 🧮 實戰建倉計算機 (風險平價模型)")
+        # ==========================================
+        # ★ 模塊一：系統建議區 (僅提供參考，不綁定下單)
+        # ==========================================
+        st.markdown("### 🧮 系統建倉建議 (風險平價計算機)")
         col_calc1, col_calc2 = st.columns(2)
         with col_calc1:
             st.metric("🏦 目前雲端可用資金", f"${st.session_state['cash_balance']:,.0f}")
@@ -320,6 +321,7 @@ with tab1:
         risk_amount = total_capital * (risk_pct / 100.0)
         entry_price = latest['Close']
         stop_loss_price = latest['SMA_20']
+        recommended_shares = 0
 
         if entry_price > stop_loss_price and total_capital > 0:
             risk_per_share = entry_price - stop_loss_price
@@ -328,29 +330,52 @@ with tab1:
             recommended_shares = min(shares_by_risk, shares_by_cash)
             invest_amount = recommended_shares * entry_price
             
-            st.success(f"📈 **建議買進股數： {recommended_shares:,.0f} 股** (約 {recommended_shares/1000:.1f} 張)")
-            st.warning(f"💰 **預計動用資金：** ${invest_amount:,.0f} ｜ **看錯停損時最多只會賠：** ${recommended_shares * risk_per_share:,.0f}")
+            st.success(f"📈 **系統建議買進股數： {recommended_shares:,.0f} 股**")
+            st.info(f"💡 預計動用資金：${invest_amount:,.0f} ｜ 若看錯停損，最多賠付風險金額：${recommended_shares * risk_per_share:,.0f}")
+        else:
+            st.error("🚨 目前股價低於防守線 20MA，處於空頭弱勢區。系統強烈建議：【空手觀望，0 股】！")
             
-            if recommended_shares > 0:
-                if st.button("🚀 確認買進並寫入雲端金庫", type="primary"):
+        st.markdown("---")
+
+        # ==========================================
+        # ★ 模塊二：使用者手動建倉區 (賦予最高決策權)
+        # ==========================================
+        st.markdown("### ✍️ 建立專屬倉位 (交易紀錄)")
+        st.caption("請依照您實際在券商軟體成交的數字填寫。系統不會強制阻擋您的交易決策。")
+        
+        with st.form("manual_trade_form"):
+            col_m1, col_m2, col_m3 = st.columns(3)
+            with col_m1:
+                manual_ticker = st.text_input("股票代碼", value=ticker_input)
+            with col_m2:
+                default_shares = max(1, int(recommended_shares)) if recommended_shares > 0 else 1000
+                manual_shares = st.number_input("實際買進股數", min_value=1, value=default_shares)
+            with col_m3:
+                manual_price = st.number_input("實際成交單價", min_value=0.01, value=float(latest['Close']), format="%.2f")
+            
+            submitted = st.form_submit_button("🚀 確認寫入雲端金庫", type="primary")
+            
+            if submitted:
+                actual_cost = manual_shares * manual_price
+                if actual_cost > st.session_state['cash_balance']:
+                    st.error(f"🚨 餘額不足！需要 ${actual_cost:,.0f}，但金庫只剩 ${st.session_state['cash_balance']:,.0f}")
+                else:
                     ws_holdings = sh.worksheet("Holdings")
                     ws_users = sh.worksheet("Users")
                     
                     buy_date = datetime.datetime.now().strftime("%Y-%m-%d")
-                    ws_holdings.append_row([st.session_state["username"], ticker_input, recommended_shares, entry_price, invest_amount, buy_date])
+                    ws_holdings.append_row([st.session_state["username"], manual_ticker.upper(), manual_shares, manual_price, actual_cost, buy_date])
                     
-                    new_cash = total_capital - invest_amount
+                    new_cash = st.session_state['cash_balance'] - actual_cost
                     users_data = ws_users.get_all_records()
                     df_users = pd.DataFrame(users_data)
                     row_idx = df_users.index[df_users['Username'] == st.session_state["username"]].tolist()[0] + 2 
                     ws_users.update_cell(row_idx, 4, new_cash)
                     
                     st.session_state["cash_balance"] = new_cash
-                    st.success("寫入成功！請前往【雲端金庫】查看。")
+                    st.success(f"✅ 成功買進 {manual_ticker.upper()} 共 {manual_shares} 股！請前往【雲端金庫】查看。")
                     st.rerun()
-        else:
-            st.error("🚨 資金不足，或目前股價低於防守線 20MA，建議空手觀望！")
-            
+
         st.markdown("---")
         
         st.markdown(f"### 🛡️ 今日戰情室：進場風險評估 (日期: {latest.name.strftime('%Y-%m-%d')})")
@@ -363,7 +388,7 @@ with tab1:
         with col4: st.markdown(f"**判定**<br><span style='font-size:20px'>{latest['Status_Signal']}</span>", unsafe_allow_html=True)
         st.markdown("---")
         
-        # ★ 圖表完美修復區塊 (加入 xaxis_rangeslider_visible=False 消滅灰色方塊)
+        # 畫圖區塊 (強制關閉範圍滑桿)
         fig = make_subplots(rows=6, cols=1, shared_xaxes=True, vertical_spacing=0.04, 
                             row_heights=[0.4, 0.12, 0.12, 0.12, 0.12, 0.12],
                             subplot_titles=("K線與均線 (含持倉獲利方塊)", "成交量 (Volume)", "KD 指標 (9)", "MACD 指標", "RSI 指標 (14)", "OBV 能量潮"))
@@ -414,9 +439,7 @@ with tab1:
         fig.add_hline(y=30, line_dash="dot", line_color="gray", row=5, col=1)
         fig.add_trace(go.Scatter(x=df.index, y=df['OBV'], line=dict(color='teal'), name='OBV'), row=6, col=1)
 
-        # ★ 強制關閉所有範圍滑桿 (消滅灰色巨大方塊)
         fig.update_layout(height=1300, hovermode="x unified", dragmode='pan', showlegend=False, xaxis_rangeslider_visible=False)
-        
         default_start = df.index[-1] - pd.Timedelta(days=150)
         dt_breaks = [d.strftime("%Y-%m-%d") for d in pd.date_range(start=df.index[0], end=df.index[-1]) if d not in df.index]
         fig.update_xaxes(range=[default_start, df.index[-1] + pd.Timedelta(days=10)], rangebreaks=[dict(values=dt_breaks)], showspikes=True, spikemode='across', spikethickness=1, spikecolor='grey', spikedash='dot')
@@ -430,7 +453,7 @@ with tab2: st.info("掃描器運作中... 請切換分頁查看")
 with tab3: st.info("回測實驗室運作中... 請切換分頁查看")
 
 # ------------------------------------------
-# 分頁四：⚖️ 雲端金庫與大盤再平衡
+# 分頁四：⚖️ 雲端金庫與大盤再平衡 (加強版容錯)
 # ------------------------------------------
 with tab4:
     st.header("⚖️ 雲端專屬金庫 ＆ 大盤氣象再平衡")
@@ -438,8 +461,14 @@ with tab4:
     
     if st.button("🔄 刷新雲端帳本與大盤數據", type="primary"):
         ws_holdings = sh.worksheet("Holdings")
-        all_holdings = pd.DataFrame(ws_holdings.get_all_records())
-        user_holdings = all_holdings[all_holdings['Username'] == st.session_state["username"]]
+        records = ws_holdings.get_all_records()
+        all_holdings = pd.DataFrame(records)
+        
+        # 防錯機制：檢查資料表是不是空的
+        if not all_holdings.empty and 'Username' in all_holdings.columns:
+            user_holdings = all_holdings[all_holdings['Username'] == st.session_state["username"]]
+        else:
+            user_holdings = pd.DataFrame() 
         
         twii = load_data("^TWII", days=100)
         twii['SMA_60'] = twii['Close'].rolling(window=60).mean()
@@ -456,16 +485,30 @@ with tab4:
         total_market_value = 0
         st.markdown("### 💼 我的雲端庫存清單")
         if not user_holdings.empty:
+            # 防禦升級 1：先預設所有欄位
+            user_holdings = user_holdings.copy()
+            user_holdings['目前股價'] = user_holdings['Entry_Price']
+            user_holdings['目前市值'] = user_holdings['Total_Cost']
+            user_holdings['未實現損益 (%)'] = 0.0
+
             for idx, row in user_holdings.iterrows():
                 try:
-                    curr_price = yf.Ticker(row['Ticker']).info.get('regularMarketPrice', row['Entry_Price'])
-                    mkt_val = curr_price * row['Shares']
-                    total_market_value += mkt_val
-                    user_holdings.at[idx, '目前股價'] = curr_price
-                    user_holdings.at[idx, '目前市值'] = mkt_val
-                    user_holdings.at[idx, '未實現損益 (%)'] = ((curr_price - row['Entry_Price']) / row['Entry_Price']) * 100
-                except:
-                    pass
+                    # 防禦升級 2：改用 history API 更穩定
+                    hist = yf.Ticker(row['Ticker']).history(period="5d")
+                    if not hist.empty:
+                        curr_price = float(hist['Close'].iloc[-1])
+                        mkt_val = curr_price * row['Shares']
+                        
+                        user_holdings.at[idx, '目前股價'] = round(curr_price, 2)
+                        user_holdings.at[idx, '目前市值'] = round(mkt_val, 0)
+                        user_holdings.at[idx, '未實現損益 (%)'] = round(((curr_price - row['Entry_Price']) / row['Entry_Price']) * 100, 2)
+                        
+                        total_market_value += mkt_val
+                    else:
+                        total_market_value += row['Total_Cost']
+                except Exception:
+                    total_market_value += row['Total_Cost']
+                    
             st.dataframe(user_holdings[['Ticker', 'Shares', 'Entry_Price', '目前股價', 'Total_Cost', '目前市值', '未實現損益 (%)']], use_container_width=True)
         else:
             st.warning("目前雲端金庫空空如也，趕快去個股分析頁面建倉吧！")
