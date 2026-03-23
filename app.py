@@ -201,11 +201,17 @@ def calculate_indicators_and_signals(df, bbw_f, vol_f, kd_thresh, use_adx, coold
     df['-DM'] = np.where((df['Low'].shift(1) - df['Low']) > (df['High'] - df['High'].shift(1)), np.maximum(df['Low'].shift(1) - df['Low'], 0), 0)
     df['ATR_14'] = df['TR'].ewm(alpha=1/14, adjust=False).mean()
     
+    # ★ 完美修復：把 ADX 指標的靈魂找回來了！
+    df['+DI'] = 100 * (df['+DM'].ewm(alpha=1/14, adjust=False).mean() / df['ATR_14'])
+    df['-DI'] = 100 * (df['-DM'].ewm(alpha=1/14, adjust=False).mean() / df['ATR_14'])
+    df['DX'] = 100 * abs(df['+DI'] - df['-DI']) / (df['+DI'] + df['-DI'])
+    df['ADX'] = df['DX'].ewm(alpha=1/14, adjust=False).mean()
+    
     df['Vol_5MA'] = df['Volume'].rolling(window=5).mean()
     df['Is_Squeeze'] = df['BBW'] <= df['BBW'].rolling(window=20).min() * bbw_f
     
     # 買賣點訊號計算
-    adx_condition = (df['DX'].ewm(alpha=1/14, adjust=False).mean() > 20) if use_adx else True
+    adx_condition = (df['ADX'] > 20) if use_adx else True
     df['Breakout_Raw'] = (df['Is_Squeeze'].rolling(window=5).max().fillna(0) == 1) & (df['Close'] > df['Upper_Band']) & (df['Volume'] > df['Vol_5MA'] * vol_f) & (df['Close'] > df['SMA_60']) & adx_condition
     df['Pullback_Raw'] = (df['K'] > df['D']) & (df['K'].shift(1) <= df['D'].shift(1)) & (df['K'] <= kd_thresh) & (df['Close'] > df['SMA_60']) & adx_condition
     df['MABounce_Raw'] = (df['SMA_5'] > df['SMA_20']) & (df['SMA_20'] > df['SMA_60']) & (df['Low'] <= (df['SMA_20'] * 1.015)) & (df['Close'] > df['SMA_20']) & (df['Close'] > df['Open']) & adx_condition
@@ -359,9 +365,7 @@ with tab1:
         with col4: st.markdown(f"**判定**<br><span style='font-size:20px'>{latest['Status_Signal']}</span>", unsafe_allow_html=True)
         st.markdown("---")
         
-        # ==========================================
-        # ★ 完美補回：K線與所有買賣點標籤繪圖區塊
-        # ==========================================
+        # 繪圖區塊
         fig = make_subplots(rows=6, cols=1, shared_xaxes=True, vertical_spacing=0.04, 
                             row_heights=[0.4, 0.12, 0.12, 0.12, 0.12, 0.12],
                             subplot_titles=("K線與均線 (含持倉獲利方塊)", "成交量 (Volume)", "KD 指標 (9)", "MACD 指標", "RSI 指標 (14)", "OBV 能量潮"))
@@ -374,7 +378,6 @@ with tab1:
         fig.add_trace(go.Scatter(x=df.index, y=df['SMA_60'], line=dict(color='green', width=2), name='60MA(季)'), row=1, col=1)
         fig.add_trace(go.Scatter(x=df.index, y=df['Lower_Band'], line=dict(color='rgba(150, 150, 150, 0.5)', width=1, dash='dash')), row=1, col=1)
 
-        # ★ 買賣點標籤完全復活
         if use_breakout: fig.add_trace(go.Scatter(x=df[df['Buy_Breakout']].index, y=df.loc[df['Buy_Breakout'], 'Low'] - df.loc[df['Buy_Breakout'], 'ATR_14'] * 0.4, mode='markers', marker=dict(symbol='triangle-up', size=14, color='magenta', line=dict(width=1, color='DarkSlateGrey')), name='買：突破'), row=1, col=1)
         if use_pullback: fig.add_trace(go.Scatter(x=df[df['Buy_Pullback']].index, y=df.loc[df['Buy_Pullback'], 'Low'] - df.loc[df['Buy_Pullback'], 'ATR_14'] * 0.8, mode='markers', marker=dict(symbol='triangle-up', size=13, color='lime', line=dict(width=1, color='DarkSlateGrey')), name='買：KD拉回'), row=1, col=1)
         if use_ma_bounce: fig.add_trace(go.Scatter(x=df[df['Buy_MABounce']].index, y=df.loc[df['Buy_MABounce'], 'Low'] - df.loc[df['Buy_MABounce'], 'ATR_14'] * 1.2, mode='markers', marker=dict(symbol='triangle-up', size=13, color='dodgerblue', line=dict(width=1, color='DarkSlateGrey')), name='買：20MA回踩'), row=1, col=1)
