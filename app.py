@@ -195,7 +195,12 @@ def calculate_indicators_and_signals(df, bbw_f, vol_f, kd_thresh, use_adx, coold
     df['ADX'] = df['DX'].ewm(alpha=1/14, adjust=False).mean()
     
     adx_condition = (df['ADX'] > 20) if use_adx else True
-    df['Breakout_Raw'] = (df['BBW'] <= df['BBW'].rolling(window=20).min() * bbw_f).rolling(window=5).max().fillna(0).astype(bool) & (df['Close'] > df['Upper_Band']) & (df['Volume'] > df['Volume'].rolling(window=5).mean() * vol_f) & (df['Close'] > df['SMA_60']) & adx_condition
+    
+    # ★ 修復：確保明確建立 Vol_5MA 欄位
+    df['Vol_5MA'] = df['Volume'].rolling(window=5).mean()
+    df['Is_Squeeze'] = df['BBW'] <= df['BBW'].rolling(window=20).min() * bbw_f
+    
+    df['Breakout_Raw'] = (df['Is_Squeeze'].rolling(window=5).max().fillna(0) == 1) & (df['Close'] > df['Upper_Band']) & (df['Volume'] > df['Vol_5MA'] * vol_f) & (df['Close'] > df['SMA_60']) & adx_condition
     df['Pullback_Raw'] = (df['K'] > df['D']) & (df['K'].shift(1) <= df['D'].shift(1)) & (df['K'] <= kd_thresh) & (df['Close'] > df['SMA_60']) & adx_condition
     df['MABounce_Raw'] = (df['SMA_5'] > df['SMA_20']) & (df['SMA_20'] > df['SMA_60']) & (df['Low'] <= (df['SMA_20'] * 1.015)) & (df['Close'] > df['SMA_20']) & (df['Close'] > df['Open']) & adx_condition
     df['5MABounce_Raw'] = (df['SMA_5'] > df['SMA_20']) & (df['Close'] > df['SMA_20']) & (df['Low'] <= (df['SMA_5'] * 1.015)) & (df['Close'] > df['SMA_5']) & (df['Close'] > df['Open']) & adx_condition
@@ -246,7 +251,6 @@ with tab1:
         st.markdown(f"## 📊 {stock_name} ({ticker_input})")
         df = calculate_indicators_and_signals(df_raw.copy(), bbw_factor, vol_factor, kd_threshold, use_adx_filter, cooldown_days, safe_bias_limit)
         
-        # --- 畫圖方塊獲利邏輯 ---
         trades_viz = []
         if show_trade_lines:
             df['Combined_Buy'] = False
@@ -330,9 +334,6 @@ with tab1:
         with col4: st.markdown(f"**判定**<br><span style='font-size:20px'>{latest['Status_Signal']}</span>", unsafe_allow_html=True)
         st.markdown("---")
         
-        # ==========================================
-        # ★ 完整修復：K線與指標畫圖區塊
-        # ==========================================
         fig = make_subplots(rows=6, cols=1, shared_xaxes=True, vertical_spacing=0.04, 
                             row_heights=[0.4, 0.12, 0.12, 0.12, 0.12, 0.12],
                             subplot_titles=("K線與均線 (含持倉獲利方塊)", "成交量 (Volume)", "KD 指標 (9)", "MACD 指標", "RSI 指標 (14)", "OBV 能量潮"))
@@ -389,13 +390,13 @@ with tab1:
         st.plotly_chart(fig, use_container_width=True, config={'scrollZoom': True})
 
 # ------------------------------------------
-# 分頁二 & 三：(維持原樣顯示)
+# 分頁二 & 三：維持原樣顯示
 # ------------------------------------------
 with tab2: st.info("🚀 掃描器運作中... 為保持程式輕量，此功能需在獨立分頁完整顯示。")
 with tab3: st.info("💰 回測實驗室運作中... 為保持程式輕量，此功能需在獨立分頁完整顯示。")
 
 # ------------------------------------------
-# 分頁四：⚖️ 雲端金庫與大盤儀表板 (極致版)
+# 分頁四：⚖️ 雲端金庫與大盤儀表板
 # ------------------------------------------
 with tab4:
     st.header("⚖️ 雲端專屬金庫 ＆ 戰情儀表板")
