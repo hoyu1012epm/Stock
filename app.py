@@ -28,7 +28,7 @@ st.sidebar.info("""
 st.sidebar.markdown("---")
 
 st.sidebar.subheader("🛡️ 總體趨勢與視覺化控管")
-show_trade_lines = st.sidebar.checkbox("開啟【買賣點獲利連線】(圖表顯示報酬)", value=True, help="在圖表上用虛線連接買賣點，並標示單趟操作的真實報酬率。")
+show_trade_lines = st.sidebar.checkbox("開啟【買賣區間透視方塊】(圖表顯示報酬)", value=True, help="在圖表上用半透明方塊標示持倉時間與價差，並顯示真實報酬率。")
 use_adx_filter = st.sidebar.checkbox("開啟【ADX 趨勢過濾】(過濾盤整雜訊)", value=True)
 cooldown_days = st.sidebar.slider("訊號冷卻天數 (建議：5 天)", min_value=1, max_value=10, value=5, step=1)
 safe_bias_limit = st.sidebar.slider("進場安全乖離率上限 (建議：5.0 %)", min_value=1.0, max_value=15.0, value=5.0, step=0.5)
@@ -191,7 +191,7 @@ with tab1:
         st.markdown(f"## 📊 {stock_name} ({ticker_input})")
         df = calculate_indicators_and_signals(df_raw.copy(), bbw_factor, vol_factor, kd_threshold, use_adx_filter, cooldown_days, safe_bias_limit)
         
-        # --- 計算連線獲利邏輯 ---
+        # --- 計算方塊獲利邏輯 (加入真實價差) ---
         if show_trade_lines:
             df['Combined_Buy'] = False
             if use_breakout: df['Combined_Buy'] = df['Combined_Buy'] | df['Buy_Breakout']
@@ -220,10 +220,11 @@ with tab1:
                     exit_p = df['Close'].iloc[i]
                     exit_d = df.index[i]
                     ret = (exit_p - entry_p) / entry_p * 100
+                    diff = exit_p - entry_p # ★ 計算真實價差
                     trades_viz.append({
                         'buy_date': entry_d, 'buy_price': entry_p, 
                         'sell_date': exit_d, 'sell_price': exit_p, 
-                        'return': ret, 'sell_high': df['High'].iloc[i], 'atr': df['ATR_14'].iloc[i]
+                        'return': ret, 'diff': diff, 'sell_high': df['High'].iloc[i], 'atr': df['ATR_14'].iloc[i]
                     })
         # ------------------------
 
@@ -262,13 +263,31 @@ with tab1:
         if use_sell_macd: fig.add_trace(go.Scatter(x=df[df['Sell_MACD']].index, y=df.loc[df['Sell_MACD'], 'High'] + df.loc[df['Sell_MACD'], 'ATR_14'] * 1.6, mode='markers', marker=dict(symbol='triangle-down', size=12, color='blue', line=dict(width=1, color='DarkSlateGrey')), name='賣：MACD死叉'), row=1, col=1)
         if use_sell_ma: fig.add_trace(go.Scatter(x=df[df['Sell_MA20']].index, y=df.loc[df['Sell_MA20'], 'High'] + df.loc[df['Sell_MA20'], 'ATR_14'] * 2.0, mode='markers', marker=dict(symbol='triangle-down', size=13, color='black', line=dict(width=1, color='DarkSlateGrey')), name='賣：破月線'), row=1, col=1)
 
+        # ★ 將獲利方塊與詳細標籤畫在圖上
         if show_trade_lines:
             for t in trades_viz:
-                line_color = "rgba(0, 200, 0, 0.8)" if t['return'] > 0 else "rgba(255, 0, 0, 0.8)"
-                bg_color = "green" if t['return'] > 0 else "red"
-                text = f"+{t['return']:.1f}%" if t['return'] > 0 else f"{t['return']:.1f}%"
-                fig.add_shape(type="line", x0=t['buy_date'], y0=t['buy_price'], x1=t['sell_date'], y1=t['sell_price'], line=dict(color=line_color, width=2, dash="dot"), row=1, col=1)
-                fig.add_annotation(x=t['sell_date'], y=t['sell_high'] + t['atr'] * 2.8, text=f"<b>{text}</b>", showarrow=True, arrowhead=1, arrowsize=1, arrowwidth=1, arrowcolor=line_color, ax=0, ay=-30, font=dict(color="white", size=11), bgcolor=bg_color, bordercolor="white", borderwidth=1, borderpad=3, row=1, col=1)
+                is_profit = t['return'] > 0
+                line_color = "rgba(0, 200, 0, 0.8)" if is_profit else "rgba(255, 0, 0, 0.8)"
+                fill_color = "rgba(0, 200, 0, 0.15)" if is_profit else "rgba(255, 0, 0, 0.15)"
+                bg_color = "green" if is_profit else "red"
+                
+                sign = "+" if is_profit else ""
+                text = f"{sign}{t['diff']:.2f} ({sign}{t['return']:.1f}%)"
+                
+                # 畫持倉區間的半透明透視方塊
+                fig.add_shape(type="rect", 
+                              x0=t['buy_date'], y0=t['buy_price'], 
+                              x1=t['sell_date'], y1=t['sell_price'], 
+                              fillcolor=fill_color, line=dict(color=line_color, width=2), 
+                              row=1, col=1)
+                
+                # 畫標籤小泡泡
+                fig.add_annotation(
+                    x=t['sell_date'], y=t['sell_high'] + t['atr'] * 2.8,
+                    text=f"<b>{text}</b>", showarrow=True, arrowhead=1, arrowsize=1, arrowwidth=1, arrowcolor=line_color,
+                    ax=0, ay=-30, font=dict(color="white", size=11), bgcolor=bg_color, bordercolor="white", borderwidth=1, borderpad=3,
+                    row=1, col=1
+                )
 
         vol_colors = ['red' if c >= o else 'green' for c, o in zip(df['Close'], df['Open'])]
         fig.add_trace(go.Bar(x=df.index, y=df['Volume'], name='成交量', marker_color=vol_colors), row=2, col=1)
@@ -288,8 +307,6 @@ with tab1:
         fig.update_layout(height=1300, hovermode="x unified", dragmode='pan', showlegend=False)
         default_start = df.index[-1] - pd.Timedelta(days=150)
         dt_breaks = [d.strftime("%Y-%m-%d") for d in pd.date_range(start=df.index[0], end=df.index[-1]) if d not in df.index]
-        
-        # ★ 修正：確保加上 config 設定開啟滾輪縮放
         fig.update_xaxes(range=[default_start, df.index[-1] + pd.Timedelta(days=10)], rangebreaks=[dict(values=dt_breaks)], showspikes=True, spikemode='across', spikethickness=1, spikecolor='grey', spikedash='dot', rangeslider=dict(visible=False))
         fig.update_yaxes(showspikes=True, spikemode='across', spikethickness=1, spikecolor='grey', spikedash='dot', nticks=15)
         st.plotly_chart(fig, use_container_width=True, config={'scrollZoom': True, 'modeBarButtonsToAdd': ['drawline', 'drawrect', 'eraseshape']})
