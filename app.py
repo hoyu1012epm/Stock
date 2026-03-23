@@ -27,8 +27,16 @@ st.sidebar.info("""
 """)
 st.sidebar.markdown("---")
 
+# ★ 新增：資金與部位管理
+st.sidebar.subheader("💰 資金與部位管理 (回測專用)")
+initial_capital = st.sidebar.number_input("初始本金 (NTD)", min_value=100000, max_value=100000000, value=1000000, step=100000)
+entry_sizing = st.sidebar.slider("單次進場資金比例 (%)", min_value=10, max_value=100, value=30, step=10, help="每次觸發買點時，投入「初始本金」的百分比。例如 30% 代表每次最多投入 30 萬，可分批加碼 3 次。100% 即為 All-In。")
+
+st.sidebar.markdown("---")
+
 st.sidebar.subheader("🛡️ 總體趨勢與視覺化控管")
-show_trade_lines = st.sidebar.checkbox("開啟【買賣區間透視方塊】(圖表顯示報酬)", value=True, help="在圖表上用半透明方塊標示持倉時間與價差，並顯示真實報酬率。")
+show_trade_lines = st.sidebar.checkbox("開啟【買賣區間透視方塊】(圖表顯示報酬)", value=True)
+strict_bull_filter = st.sidebar.checkbox("開啟【嚴格長線多頭過濾】(避開熊市雙巴)", value=True)
 use_adx_filter = st.sidebar.checkbox("開啟【ADX 趨勢過濾】(過濾盤整雜訊)", value=True)
 cooldown_days = st.sidebar.slider("訊號冷卻天數 (建議：5 天)", min_value=1, max_value=10, value=5, step=1)
 safe_bias_limit = st.sidebar.slider("進場安全乖離率上限 (建議：5.0 %)", min_value=1.0, max_value=15.0, value=5.0, step=0.5)
@@ -89,7 +97,7 @@ def apply_cooldown(signal_series, cooldown_period):
             last_signal_idx = i
     return clean_signal
 
-def calculate_indicators_and_signals(df, bbw_f, vol_f, kd_thresh, use_adx, cooldown, bias_limit):
+def calculate_indicators_and_signals(df, bbw_f, vol_f, kd_thresh, use_adx, cooldown, bias_limit, strict_bull):
     if len(df) < 60: return df 
     
     df['SMA_5'] = df['Close'].rolling(window=5).mean()
@@ -148,12 +156,16 @@ def calculate_indicators_and_signals(df, bbw_f, vol_f, kd_thresh, use_adx, coold
 
     adx_condition = (df['ADX'] > 20) if use_adx else True
 
+    df['SMA_60_Trend_Up'] = df['SMA_60'] > df['SMA_60'].shift(1)
+    df['Bull_Align'] = df['SMA_20'] > df['SMA_60']
+    trend_filter = (df['SMA_60_Trend_Up'] & df['Bull_Align']) if strict_bull else True
+
     df['Vol_5MA'] = df['Volume'].rolling(window=5).mean()
     df['Is_Squeeze'] = df['BBW'] <= df['BBW'].rolling(window=20).min() * bbw_f
-    df['Breakout_Raw'] = (df['Is_Squeeze'].rolling(window=5).max().fillna(0) == 1) & (df['Close'] > df['Upper_Band']) & (df['Volume'] > df['Vol_5MA'] * vol_f) & (df['Close'] > df['SMA_60']) & adx_condition
-    df['Pullback_Raw'] = (df['K'] > df['D']) & (df['K'].shift(1) <= df['D'].shift(1)) & (df['K'] <= kd_thresh) & (df['Close'] > df['SMA_60']) & adx_condition
-    df['MABounce_Raw'] = (df['SMA_5'] > df['SMA_20']) & (df['SMA_20'] > df['SMA_60']) & (df['Low'] <= (df['SMA_20'] * 1.015)) & (df['Close'] > df['SMA_20']) & (df['Close'] > df['Open']) & adx_condition
-    df['5MABounce_Raw'] = (df['SMA_5'] > df['SMA_20']) & (df['Close'] > df['SMA_20']) & (df['Low'] <= (df['SMA_5'] * 1.015)) & (df['Close'] > df['SMA_5']) & (df['Close'] > df['Open']) & adx_condition
+    df['Breakout_Raw'] = (df['Is_Squeeze'].rolling(window=5).max().fillna(0) == 1) & (df['Close'] > df['Upper_Band']) & (df['Volume'] > df['Vol_5MA'] * vol_f) & (df['Close'] > df['SMA_60']) & adx_condition & trend_filter
+    df['Pullback_Raw'] = (df['K'] > df['D']) & (df['K'].shift(1) <= df['D'].shift(1)) & (df['K'] <= kd_thresh) & (df['Close'] > df['SMA_60']) & adx_condition & trend_filter
+    df['MABounce_Raw'] = (df['SMA_5'] > df['SMA_20']) & (df['SMA_20'] > df['SMA_60']) & (df['Low'] <= (df['SMA_20'] * 1.015)) & (df['Close'] > df['SMA_20']) & (df['Close'] > df['Open']) & adx_condition & trend_filter
+    df['5MABounce_Raw'] = (df['SMA_5'] > df['SMA_20']) & (df['Close'] > df['SMA_20']) & (df['Low'] <= (df['SMA_5'] * 1.015)) & (df['Close'] > df['SMA_5']) & (df['Close'] > df['Open']) & adx_condition & trend_filter
 
     df['Sell_5MA_Raw'] = (df['Close'] < df['SMA_5']) & (df['Close'].shift(1) >= df['SMA_5'].shift(1))
     df['Sell_KD_Raw'] = (df['K'] < df['D']) & (df['K'].shift(1) >= df['D'].shift(1)) & (df['K'].shift(1) >= 80)
@@ -189,9 +201,8 @@ with tab1:
     if not df_raw.empty:
         stock_name = get_stock_name(ticker_input)
         st.markdown(f"## 📊 {stock_name} ({ticker_input})")
-        df = calculate_indicators_and_signals(df_raw.copy(), bbw_factor, vol_factor, kd_threshold, use_adx_filter, cooldown_days, safe_bias_limit)
+        df = calculate_indicators_and_signals(df_raw.copy(), bbw_factor, vol_factor, kd_threshold, use_adx_filter, cooldown_days, safe_bias_limit, strict_bull_filter)
         
-        # --- 計算方塊獲利邏輯 (加入真實價差) ---
         if show_trade_lines:
             df['Combined_Buy'] = False
             if use_breakout: df['Combined_Buy'] = df['Combined_Buy'] | df['Buy_Breakout']
@@ -220,13 +231,12 @@ with tab1:
                     exit_p = df['Close'].iloc[i]
                     exit_d = df.index[i]
                     ret = (exit_p - entry_p) / entry_p * 100
-                    diff = exit_p - entry_p # ★ 計算真實價差
+                    diff = exit_p - entry_p 
                     trades_viz.append({
                         'buy_date': entry_d, 'buy_price': entry_p, 
                         'sell_date': exit_d, 'sell_price': exit_p, 
                         'return': ret, 'diff': diff, 'sell_high': df['High'].iloc[i], 'atr': df['ATR_14'].iloc[i]
                     })
-        # ------------------------
 
         latest = df.iloc[-1]
         prev = df.iloc[-2]
@@ -263,7 +273,6 @@ with tab1:
         if use_sell_macd: fig.add_trace(go.Scatter(x=df[df['Sell_MACD']].index, y=df.loc[df['Sell_MACD'], 'High'] + df.loc[df['Sell_MACD'], 'ATR_14'] * 1.6, mode='markers', marker=dict(symbol='triangle-down', size=12, color='blue', line=dict(width=1, color='DarkSlateGrey')), name='賣：MACD死叉'), row=1, col=1)
         if use_sell_ma: fig.add_trace(go.Scatter(x=df[df['Sell_MA20']].index, y=df.loc[df['Sell_MA20'], 'High'] + df.loc[df['Sell_MA20'], 'ATR_14'] * 2.0, mode='markers', marker=dict(symbol='triangle-down', size=13, color='black', line=dict(width=1, color='DarkSlateGrey')), name='賣：破月線'), row=1, col=1)
 
-        # ★ 將獲利方塊與詳細標籤畫在圖上
         if show_trade_lines:
             for t in trades_viz:
                 is_profit = t['return'] > 0
@@ -274,14 +283,12 @@ with tab1:
                 sign = "+" if is_profit else ""
                 text = f"{sign}{t['diff']:.2f} ({sign}{t['return']:.1f}%)"
                 
-                # 畫持倉區間的半透明透視方塊
                 fig.add_shape(type="rect", 
                               x0=t['buy_date'], y0=t['buy_price'], 
                               x1=t['sell_date'], y1=t['sell_price'], 
                               fillcolor=fill_color, line=dict(color=line_color, width=2), 
                               row=1, col=1)
                 
-                # 畫標籤小泡泡
                 fig.add_annotation(
                     x=t['sell_date'], y=t['sell_high'] + t['atr'] * 2.8,
                     text=f"<b>{text}</b>", showarrow=True, arrowhead=1, arrowsize=1, arrowwidth=1, arrowcolor=line_color,
@@ -338,7 +345,7 @@ with tab2:
             try:
                 ds = load_data(t, days=150)
                 if not ds.empty:
-                    dc = calculate_indicators_and_signals(ds, bbw_factor, vol_factor, kd_threshold, use_adx_filter, cooldown_days, safe_bias_limit)
+                    dc = calculate_indicators_and_signals(ds, bbw_factor, vol_factor, kd_threshold, use_adx_filter, cooldown_days, safe_bias_limit, strict_bull_filter)
                     l = dc.iloc[-1]
                     buy1 = use_breakout and l['Buy_Breakout']
                     buy2 = use_pullback and l['Buy_Pullback']
@@ -365,7 +372,8 @@ with tab2:
 # 分頁三：策略回測實驗室 
 # ------------------------------------------
 with tab3:
-    st.header("💰 策略回測實驗室 (實戰驗證)")
+    st.header("💰 策略回測實驗室 (實戰資金控管)")
+    
     col_t1, col_t2 = st.columns(2)
     with col_t1:
         backtest_ticker = st.text_input("🔍 請輸入要回測的股票代碼", value="2330.TW", key="tab3_input").strip().upper()
@@ -381,7 +389,7 @@ with tab3:
         df_bt_raw = load_data(backtest_ticker, days=2200) 
         
         if not df_bt_raw.empty:
-            df_bt_all = calculate_indicators_and_signals(df_bt_raw.copy(), bbw_factor, vol_factor, kd_threshold, use_adx_filter, cooldown_days, safe_bias_limit)
+            df_bt_all = calculate_indicators_and_signals(df_bt_raw.copy(), bbw_factor, vol_factor, kd_threshold, use_adx_filter, cooldown_days, safe_bias_limit, strict_bull_filter)
             
             if backtest_period == "過去 1 年 (近期大牛市)":
                 df_bt = df_bt_all.last("365D").copy()
@@ -405,7 +413,7 @@ with tab3:
             if use_sell_macd: df_bt['Combined_Sell'] = df_bt['Combined_Sell'] | df_bt['Sell_MACD']
             if use_sell_ma: df_bt['Combined_Sell'] = df_bt['Combined_Sell'] | df_bt['Sell_MA20']
 
-            initial_capital = 1000000
+            # ★ 分批進場回測引擎邏輯
             cash = initial_capital
             position = 0
             equity_curve = []
@@ -413,30 +421,55 @@ with tab3:
             
             win_trades = 0
             total_trades = 0
-            entry_price = 0
+            avg_cost = 0 # 紀錄庫存均價
             
             for i in range(len(df_bt)):
                 current_date = df_bt.index[i]
                 current_price = df_bt['Close'].iloc[i]
                 
-                # 判斷賣出
+                # 判斷賣出 (全部獲利了結或停損)
                 if position > 0 and df_bt['Combined_Sell'].iloc[i]:
-                    cash = position * current_price
+                    cash += position * current_price
                     total_trades += 1
-                    if current_price > entry_price:
+                    if current_price > avg_cost:
                         win_trades += 1
-                    trade_log.append({"日期": current_date.strftime('%Y-%m-%d'), "動作": "🔴 賣出", "價格": round(current_price, 2), "資產餘額": round(cash, 0)})
+                    
+                    trade_log.append({
+                        "日期": current_date.strftime('%Y-%m-%d'), 
+                        "動作": "🔴 全部賣出", 
+                        "價格": round(current_price, 2), 
+                        "庫存均價": round(avg_cost, 2),
+                        "資產餘額": round(cash, 0)
+                    })
                     position = 0
+                    avg_cost = 0
                 
-                # 判斷買進
-                elif position == 0 and df_bt['Combined_Buy'].iloc[i]:
-                    position = cash / current_price
-                    entry_price = current_price
-                    trade_log.append({"日期": current_date.strftime('%Y-%m-%d'), "動作": "🟢 買進", "價格": round(current_price, 2), "資產餘額": round(cash, 0)})
-                    cash = 0
+                # 判斷買進 (依照比例分批進場)
+                elif df_bt['Combined_Buy'].iloc[i]:
+                    invest_target = initial_capital * (entry_sizing / 100.0)
+                    actual_invest = min(cash, invest_target) # 確保現金夠用
+                    
+                    # 只要剩餘現金還大於初始資金的 1%，就允許繼續買
+                    if actual_invest > (initial_capital * 0.01):
+                        shares_to_buy = actual_invest / current_price
+                        
+                        # 重新計算庫存均價
+                        total_cost = (position * avg_cost) + (shares_to_buy * current_price)
+                        position += shares_to_buy
+                        avg_cost = total_cost / position
+                        
+                        cash -= (shares_to_buy * current_price)
+                        
+                        trade_log.append({
+                            "日期": current_date.strftime('%Y-%m-%d'), 
+                            "動作": "🟢 分批買進", 
+                            "價格": round(current_price, 2), 
+                            "庫存均價": round(avg_cost, 2),
+                            "資產餘額": round(cash, 0)
+                        })
                 
                 # 紀錄每日淨值
-                current_equity = cash + (position * current_price if position > 0 else 0)
+                current_equity = cash + (position * current_price)
                 equity_curve.append(current_equity)
             
             df_bt['Strategy_Equity'] = equity_curve
