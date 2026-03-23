@@ -89,7 +89,7 @@ if not st.session_state["logged_in"]:
     st.stop() 
 
 # ==========================================
-# ⚙️ 登入後主程式開始
+# ⚙️ 登入後主程式開始 - 左側邊欄設定
 # ==========================================
 st.sidebar.title(f"👤 歡迎回來，{st.session_state['username']}！")
 st.sidebar.metric("🏦 雲端可用現金", f"${st.session_state['cash_balance']:,.0f}")
@@ -98,6 +98,10 @@ if st.sidebar.button("登出系統"):
     st.rerun()
 
 st.sidebar.markdown("---")
+# ★ 建立一個空的容器，用來把下單匣卡在側邊欄最上面
+sidebar_trade_container = st.sidebar.container()
+st.sidebar.markdown("---")
+
 st.sidebar.title("⚙️ 策略參數控制台")
 show_trade_lines = st.sidebar.checkbox("開啟【買賣區間透視方塊】", value=True)
 use_adx_filter = st.sidebar.checkbox("開啟【ADX 趨勢過濾】", value=True)
@@ -196,7 +200,6 @@ def calculate_indicators_and_signals(df, bbw_f, vol_f, kd_thresh, use_adx, coold
     
     adx_condition = (df['ADX'] > 20) if use_adx else True
     
-    # ★ 修復：確保明確建立 Vol_5MA 欄位
     df['Vol_5MA'] = df['Volume'].rolling(window=5).mean()
     df['Is_Squeeze'] = df['BBW'] <= df['BBW'].rolling(window=20).min() * bbw_f
     
@@ -239,7 +242,7 @@ def draw_gauge(val, max_val, title, color):
 tab1, tab2, tab3, tab4 = st.tabs(["📊 個股詳細分析", "🚀 策略選股掃描器", "💰 策略回測實驗室", "⚖️ 雲端金庫與再平衡"])
 
 # ------------------------------------------
-# 分頁一：個股詳細分析 (包含手動建倉系統)
+# 分頁一：個股詳細分析 (並動態載入左側下單匣)
 # ------------------------------------------
 with tab1:
     ticker_input_raw = st.text_input("🔍 請輸入要分析的股票代碼", value="2330.TW", key="tab1_input")
@@ -281,7 +284,8 @@ with tab1:
 
         latest, prev = df.iloc[-1], df.iloc[-2]
         
-        st.markdown("### 🧮 系統建倉建議 (風險平價計算機)")
+        # 系統建倉建議
+        st.markdown("### 🧮 系統建倉建議 (風險平價)")
         col_calc1, col_calc2 = st.columns(2)
         with col_calc1: st.metric("🏦 目前雲端可用資金", f"${st.session_state['cash_balance']:,.0f}")
         with col_calc2: risk_pct = st.slider("⚠️ 單筆願意承受最大虧損 (%)", min_value=0.5, max_value=5.0, value=2.0, step=0.5)
@@ -294,35 +298,34 @@ with tab1:
 
         if entry_price > stop_loss_price and total_capital > 0:
             recommended_shares = min(int(risk_amount // (entry_price - stop_loss_price)), int(total_capital // entry_price))
-            st.success(f"📈 **系統建議買進股數： {recommended_shares:,.0f} 股** (動用資金：${recommended_shares * entry_price:,.0f})")
+            st.success(f"📈 **系統建議買進股數： {recommended_shares:,.0f} 股**")
         else: st.error("🚨 目前股價低於防守線 20MA，處於空頭弱勢區。建議：【空手觀望，0 股】！")
-            
-        st.markdown("---")
-
-        st.markdown("### ✍️ 建立專屬倉位 (交易紀錄)")
-        st.caption("請依照您實際在券商軟體成交的數字填寫。本程式僅提供策略參考，賦予您最高決策權。")
         
-        with st.form("manual_trade_form"):
-            col_m1, col_m2, col_m3 = st.columns(3)
-            with col_m1: manual_ticker = st.text_input("股票代碼", value=ticker_input)
-            with col_m2: manual_shares = st.number_input("實際買進股數", min_value=1, value=max(1, int(recommended_shares)))
-            with col_m3: manual_price = st.number_input("實際成交單價", min_value=0.01, value=float(latest['Close']), format="%.2f")
-            
-            if st.form_submit_button("🚀 確認寫入雲端金庫", type="primary"):
-                actual_cost = manual_shares * manual_price
-                if actual_cost > st.session_state['cash_balance']: st.error(f"🚨 餘額不足！")
-                else:
-                    ws_holdings = sh.worksheet("Holdings")
-                    ws_users = sh.worksheet("Users")
-                    ws_holdings.append_row([st.session_state["username"], manual_ticker.upper(), manual_shares, manual_price, actual_cost, datetime.datetime.now().strftime("%Y-%m-%d")])
-                    
-                    new_cash = st.session_state['cash_balance'] - actual_cost
-                    df_users = pd.DataFrame(ws_users.get_all_records())
-                    row_idx = df_users.index[df_users['Username'] == st.session_state["username"]].tolist()[0] + 2 
-                    ws_users.update_cell(row_idx, 4, new_cash)
-                    st.session_state["cash_balance"] = new_cash
-                    st.success(f"✅ 成功買進 {manual_ticker.upper()}！請前往【雲端金庫】查看。")
-                    st.rerun()
+        # ==========================================
+        # ★ 移至側邊欄的「專屬下單匣」
+        # ==========================================
+        with sidebar_trade_container:
+            st.markdown("### ✍️ 專屬下單匣")
+            with st.form("manual_trade_form"):
+                manual_ticker = st.text_input("股票代碼", value=ticker_input)
+                manual_shares = st.number_input("買進股數", min_value=1, value=max(1, int(recommended_shares)))
+                manual_price = st.number_input("成交單價", min_value=0.01, value=float(latest['Close']), format="%.2f")
+                
+                if st.form_submit_button("🚀 寫入雲端金庫", type="primary", use_container_width=True):
+                    actual_cost = manual_shares * manual_price
+                    if actual_cost > st.session_state['cash_balance']: st.error(f"🚨 餘額不足！")
+                    else:
+                        ws_holdings = sh.worksheet("Holdings")
+                        ws_users = sh.worksheet("Users")
+                        ws_holdings.append_row([st.session_state["username"], manual_ticker.upper(), manual_shares, manual_price, actual_cost, datetime.datetime.now().strftime("%Y-%m-%d")])
+                        
+                        new_cash = st.session_state['cash_balance'] - actual_cost
+                        df_users = pd.DataFrame(ws_users.get_all_records())
+                        row_idx = df_users.index[df_users['Username'] == st.session_state["username"]].tolist()[0] + 2 
+                        ws_users.update_cell(row_idx, 4, new_cash)
+                        st.session_state["cash_balance"] = new_cash
+                        st.success(f"✅ 已買進 {manual_ticker.upper()}！請至金庫查看。")
+                        st.rerun()
 
         st.markdown("---")
         
@@ -389,14 +392,11 @@ with tab1:
         fig.update_xaxes(range=[df.index[-1] - pd.Timedelta(days=150), df.index[-1] + pd.Timedelta(days=10)], rangebreaks=[dict(values=dt_breaks)])
         st.plotly_chart(fig, use_container_width=True, config={'scrollZoom': True})
 
-# ------------------------------------------
-# 分頁二 & 三：維持原樣顯示
-# ------------------------------------------
 with tab2: st.info("🚀 掃描器運作中... 為保持程式輕量，此功能需在獨立分頁完整顯示。")
 with tab3: st.info("💰 回測實驗室運作中... 為保持程式輕量，此功能需在獨立分頁完整顯示。")
 
 # ------------------------------------------
-# 分頁四：⚖️ 雲端金庫與大盤儀表板
+# 分頁四：⚖️ 雲端金庫與大盤儀表板 (新增 Excel 匯出功能)
 # ------------------------------------------
 with tab4:
     st.header("⚖️ 雲端專屬金庫 ＆ 戰情儀表板")
@@ -497,6 +497,7 @@ with tab4:
         if not df_h.empty:
             view_mode = st.radio("👀 請選擇檢視模式：", ["📊 彙總視角 (按股票合併計算)", "📝 明細視角 (逐筆交易紀錄)"], horizontal=True)
             
+            csv_data = None
             if "彙總" in view_mode:
                 summary = df_h.groupby('Ticker').agg({
                     'Shares': 'sum', 'Total_Cost': 'sum', '目前股價': 'first'
@@ -506,7 +507,22 @@ with tab4:
                 summary['總未實現損益 (%)'] = (((summary['目前股價'] - summary['平均成本價']) / summary['平均成本價']) * 100).round(2)
                 summary = summary[['Ticker', 'Shares', '平均成本價', '目前股價', 'Total_Cost', '目前總市值', '總未實現損益 (%)']]
                 st.dataframe(summary, use_container_width=True)
+                
+                # ★ 匯出：轉成 UTF-8-SIG 避免 Excel 中文亂碼
+                csv_data = summary.to_csv(index=False).encode('utf-8-sig')
             else:
-                st.dataframe(df_h[['Ticker', 'Shares', 'Entry_Price', '目前股價', 'Total_Cost', '目前市值', '未實現損益 (%)', 'Buy_Date']], use_container_width=True)
+                detail_df = df_h[['Ticker', 'Shares', 'Entry_Price', '目前股價', 'Total_Cost', '目前市值', '未實現損益 (%)', 'Buy_Date']]
+                st.dataframe(detail_df, use_container_width=True)
+                csv_data = detail_df.to_csv(index=False).encode('utf-8-sig')
+            
+            # ★ 一鍵下載按鈕
+            st.download_button(
+                label="📥 一鍵匯出 Excel 對帳單 (CSV)",
+                data=csv_data,
+                file_name=f"Quant_Portfolio_{datetime.datetime.now().strftime('%Y%m%d')}.csv",
+                mime="text/csv",
+                type="primary"
+            )
+            
         else:
-            st.warning("目前雲端金庫空空如也，趕快去建倉吧！")
+            st.warning("目前雲端金庫空空如也，趕快去左側側邊欄建倉吧！")
