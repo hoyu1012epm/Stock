@@ -89,7 +89,7 @@ if not st.session_state["logged_in"]:
     st.stop() 
 
 # ==========================================
-# ⚙️ 左側邊欄設定 (新增雙引擎切換)
+# ⚙️ 左側邊欄設定 (雙引擎切換)
 # ==========================================
 st.sidebar.title(f"👤 歡迎回來，{st.session_state['username']}！")
 st.sidebar.metric("🏦 雲端可用現金", f"${st.session_state['cash_balance']:,.0f}")
@@ -98,7 +98,6 @@ if st.sidebar.button("登出系統"):
     st.rerun()
 
 st.sidebar.markdown("---")
-# ★ 新增：雙引擎交易流派切換
 st.sidebar.title("🧠 核心交易流派選擇")
 trade_style = st.sidebar.radio("請選擇您的操作信仰：", [
     "📈 順勢動能 (右側交易：確認向上才買)",
@@ -114,6 +113,25 @@ show_trade_lines = st.sidebar.checkbox("開啟【買賣區間透視方塊】", v
 use_adx_filter = st.sidebar.checkbox("開啟【ADX 趨勢過濾】", value=True)
 cooldown_days = st.sidebar.slider("訊號冷卻天數", min_value=1, max_value=10, value=5)
 safe_bias_limit = st.sidebar.slider("進場安全乖離率上限 (%)", min_value=1.0, max_value=15.0, value=5.0)
+
+# 買賣點設定
+st.sidebar.markdown("---")
+st.sidebar.subheader("🎯 買點設定 (向上箭頭 ▲)")
+use_breakout = st.sidebar.checkbox("開啟【壓縮突破】買點 (桃紅 ▲)", value=True)
+bbw_factor = st.sidebar.slider("└ 布林壓縮容錯率", min_value=1.0, max_value=1.5, value=1.1)
+vol_factor = st.sidebar.slider("└ 成交量爆發倍數", min_value=1.0, max_value=3.0, value=1.5)
+use_pullback = st.sidebar.checkbox("開啟【多頭拉回】買點 (綠色 ▲)", value=False)
+kd_threshold = st.sidebar.slider("└ KD 金叉最高位階", min_value=20, max_value=80, value=50)
+use_ma_bounce = st.sidebar.checkbox("開啟【20MA 回踩】波段買點 (淺藍 ▲)", value=True)
+use_5ma_bounce = st.sidebar.checkbox("開啟【5MA 回踩】飆股買點 (黃色 ▲)", value=False)
+
+st.sidebar.markdown("---")
+st.sidebar.subheader("🛑 賣點設定 (向下箭頭 ▼)")
+use_sell_5ma = st.sidebar.checkbox("開啟【跌破 5MA】極短線停利", value=False)
+use_sell_kd = st.sidebar.checkbox("開啟【KD 高檔死叉】短線停利", value=False)
+use_sell_rsi = st.sidebar.checkbox("開啟【RSI 跌破 70】過熱出場", value=False)
+use_sell_macd = st.sidebar.checkbox("開啟【MACD 死叉】波段轉弱", value=True)
+use_sell_ma = st.sidebar.checkbox("開啟【跌破 20MA】波段停損", value=True)
 
 # ==========================================
 # 📊 核心運算函數
@@ -134,6 +152,15 @@ def load_data(ticker, days=1825):
     if df.empty: return df
     df.index = pd.to_datetime(df.index).tz_localize(None)
     return df
+
+def apply_cooldown(signal_series, cooldown_period):
+    clean_signal = pd.Series(False, index=signal_series.index)
+    last_signal_idx = -cooldown_period - 1
+    for i, val in enumerate(signal_series):
+        if val and (i - last_signal_idx) > cooldown_period:
+            clean_signal.iloc[i] = True
+            last_signal_idx = i
+    return clean_signal
 
 def calculate_indicators_and_signals(df, bbw_f, vol_f, kd_thresh, use_adx, cooldown, bias_limit):
     if len(df) < 60: return df 
@@ -175,6 +202,30 @@ def calculate_indicators_and_signals(df, bbw_f, vol_f, kd_thresh, use_adx, coold
     df['ATR_14'] = df['TR'].ewm(alpha=1/14, adjust=False).mean()
     
     df['Vol_5MA'] = df['Volume'].rolling(window=5).mean()
+    df['Is_Squeeze'] = df['BBW'] <= df['BBW'].rolling(window=20).min() * bbw_f
+    
+    # 買賣點訊號計算
+    adx_condition = (df['DX'].ewm(alpha=1/14, adjust=False).mean() > 20) if use_adx else True
+    df['Breakout_Raw'] = (df['Is_Squeeze'].rolling(window=5).max().fillna(0) == 1) & (df['Close'] > df['Upper_Band']) & (df['Volume'] > df['Vol_5MA'] * vol_f) & (df['Close'] > df['SMA_60']) & adx_condition
+    df['Pullback_Raw'] = (df['K'] > df['D']) & (df['K'].shift(1) <= df['D'].shift(1)) & (df['K'] <= kd_thresh) & (df['Close'] > df['SMA_60']) & adx_condition
+    df['MABounce_Raw'] = (df['SMA_5'] > df['SMA_20']) & (df['SMA_20'] > df['SMA_60']) & (df['Low'] <= (df['SMA_20'] * 1.015)) & (df['Close'] > df['SMA_20']) & (df['Close'] > df['Open']) & adx_condition
+    df['5MABounce_Raw'] = (df['SMA_5'] > df['SMA_20']) & (df['Close'] > df['SMA_20']) & (df['Low'] <= (df['SMA_5'] * 1.015)) & (df['Close'] > df['SMA_5']) & (df['Close'] > df['Open']) & adx_condition
+
+    df['Sell_5MA_Raw'] = (df['Close'] < df['SMA_5']) & (df['Close'].shift(1) >= df['SMA_5'].shift(1))
+    df['Sell_KD_Raw'] = (df['K'] < df['D']) & (df['K'].shift(1) >= df['D'].shift(1)) & (df['K'].shift(1) >= 80)
+    df['Sell_RSI_Raw'] = (df['RSI'] < 70) & (df['RSI'].shift(1) >= 70)
+    df['Sell_MACD_Raw'] = (df['MACD'] < df['Signal']) & (df['MACD'].shift(1) >= df['Signal'].shift(1))
+    df['Sell_MA20_Raw'] = (df['Close'] < df['SMA_20']) & (df['Close'].shift(1) >= df['SMA_20'].shift(1))
+
+    df['Buy_Breakout'] = apply_cooldown(df['Breakout_Raw'], cooldown)
+    df['Buy_Pullback'] = apply_cooldown(df['Pullback_Raw'], cooldown)
+    df['Buy_MABounce'] = apply_cooldown(df['MABounce_Raw'], cooldown)
+    df['Buy_5MABounce'] = apply_cooldown(df['5MABounce_Raw'], cooldown)
+    df['Sell_5MA'] = apply_cooldown(df['Sell_5MA_Raw'], cooldown)
+    df['Sell_KD'] = apply_cooldown(df['Sell_KD_Raw'], cooldown)
+    df['Sell_RSI'] = apply_cooldown(df['Sell_RSI_Raw'], cooldown)
+    df['Sell_MACD'] = apply_cooldown(df['Sell_MACD_Raw'], cooldown)
+    df['Sell_MA20'] = apply_cooldown(df['Sell_MA20_Raw'], cooldown)
     return df
 
 def draw_gauge(val, max_val, title, color):
@@ -204,12 +255,38 @@ with tab1:
     if not df_raw.empty:
         stock_name = get_stock_name(ticker_input)
         st.markdown(f"## 📊 {stock_name} ({ticker_input})")
-        df = calculate_indicators_and_signals(df_raw.copy(), 1.1, 1.5, 50, True, 5, 5.0)
+        df = calculate_indicators_and_signals(df_raw.copy(), bbw_factor, vol_factor, kd_threshold, use_adx_filter, cooldown_days, safe_bias_limit)
+        
+        trades_viz = []
+        if show_trade_lines:
+            df['Combined_Buy'] = False
+            if use_breakout: df['Combined_Buy'] = df['Combined_Buy'] | df['Buy_Breakout']
+            if use_pullback: df['Combined_Buy'] = df['Combined_Buy'] | df['Buy_Pullback']
+            if use_ma_bounce: df['Combined_Buy'] = df['Combined_Buy'] | df['Buy_MABounce']
+            if use_5ma_bounce: df['Combined_Buy'] = df['Combined_Buy'] | df['Buy_5MABounce']
+            
+            df['Combined_Sell'] = False
+            if use_sell_5ma: df['Combined_Sell'] = df['Combined_Sell'] | df['Sell_5MA']
+            if use_sell_kd: df['Combined_Sell'] = df['Combined_Sell'] | df['Sell_KD']
+            if use_sell_rsi: df['Combined_Sell'] = df['Combined_Sell'] | df['Sell_RSI']
+            if use_sell_macd: df['Combined_Sell'] = df['Combined_Sell'] | df['Sell_MACD']
+            if use_sell_ma: df['Combined_Sell'] = df['Combined_Sell'] | df['Sell_MA20']
+
+            pos, entry_p, entry_d = 0, 0, None
+            for i in range(len(df)):
+                if pos == 0 and df['Combined_Buy'].iloc[i]:
+                    pos, entry_p, entry_d = 1, df['Close'].iloc[i], df.index[i]
+                elif pos == 1 and df['Combined_Sell'].iloc[i]:
+                    pos = 0
+                    exit_p, exit_d = df['Close'].iloc[i], df.index[i]
+                    trades_viz.append({
+                        'buy_date': entry_d, 'buy_price': entry_p, 'sell_date': exit_d, 'sell_price': exit_p, 
+                        'return': (exit_p - entry_p) / entry_p * 100, 'diff': exit_p - entry_p, 
+                        'sell_high': df['High'].iloc[i], 'atr': df['ATR_14'].iloc[i]
+                    })
+
         latest, prev = df.iloc[-1], df.iloc[-2]
         
-        # ==========================================
-        # ★ 雙引擎建倉計算機
-        # ==========================================
         st.markdown(f"### 🧮 系統建倉建議 ({'📈 順勢動能' if '順勢' in trade_style else '🛒 價值抄底'}模型)")
         col_calc1, col_calc2 = st.columns(2)
         with col_calc1: st.metric("🏦 目前雲端可用資金", f"${st.session_state['cash_balance']:,.0f}")
@@ -221,7 +298,6 @@ with tab1:
         recommended_shares = 0
 
         if "順勢" in trade_style:
-            # 【右側順勢邏輯】嚴格防守 20MA
             stop_loss_price = latest['SMA_20']
             if entry_price > stop_loss_price and total_capital > 0:
                 risk_per_share = entry_price - stop_loss_price
@@ -230,8 +306,7 @@ with tab1:
             else: 
                 st.error("🚨 目前股價低於防守線 20MA，處於空頭弱勢區。順勢策略建議：【空手觀望，0 股】！")
         else:
-            # 【左側抄底邏輯】金字塔分批建倉法
-            assumed_risk_per_share = entry_price * 0.10 # 預設若再跌 10% 為極限風險
+            assumed_risk_per_share = entry_price * 0.10 
             max_shares = min(int(risk_amount // assumed_risk_per_share), int(total_capital // entry_price))
             
             if entry_price > latest['SMA_20']:
@@ -284,16 +359,45 @@ with tab1:
         with col4: st.markdown(f"**判定**<br><span style='font-size:20px'>{latest['Status_Signal']}</span>", unsafe_allow_html=True)
         st.markdown("---")
         
-        # 繪圖區塊
+        # ==========================================
+        # ★ 完美補回：K線與所有買賣點標籤繪圖區塊
+        # ==========================================
         fig = make_subplots(rows=6, cols=1, shared_xaxes=True, vertical_spacing=0.04, 
                             row_heights=[0.4, 0.12, 0.12, 0.12, 0.12, 0.12],
-                            subplot_titles=("K線與均線", "成交量 (Volume)", "KD 指標 (9)", "MACD 指標", "RSI 指標 (14)", "OBV 能量潮"))
+                            subplot_titles=("K線與均線 (含持倉獲利方塊)", "成交量 (Volume)", "KD 指標 (9)", "MACD 指標", "RSI 指標 (14)", "OBV 能量潮"))
+        fig.update_annotations(x=0, xanchor="left", font_size=14, font_color="gray")
+        
         fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name='K線', increasing_line_color='red', decreasing_line_color='green', customdata=df['Hover_Text'], hovertemplate="<b>日期:</b> %{x|%Y-%m-%d}<br><b>收:</b> %{close:.2f}<br><br>%{customdata}<extra></extra>"), row=1, col=1)
         fig.add_trace(go.Scatter(x=df.index, y=df['Upper_Band'], line=dict(color='rgba(150, 150, 150, 0.5)', width=1, dash='dash')), row=1, col=1)
         fig.add_trace(go.Scatter(x=df.index, y=df['SMA_5'], line=dict(color='magenta', width=1.5), name='5MA(週)'), row=1, col=1) 
         fig.add_trace(go.Scatter(x=df.index, y=df['SMA_20'], line=dict(color='blue', width=1.5), name='20MA(月)'), row=1, col=1)
         fig.add_trace(go.Scatter(x=df.index, y=df['SMA_60'], line=dict(color='green', width=2), name='60MA(季)'), row=1, col=1)
         fig.add_trace(go.Scatter(x=df.index, y=df['Lower_Band'], line=dict(color='rgba(150, 150, 150, 0.5)', width=1, dash='dash')), row=1, col=1)
+
+        # ★ 買賣點標籤完全復活
+        if use_breakout: fig.add_trace(go.Scatter(x=df[df['Buy_Breakout']].index, y=df.loc[df['Buy_Breakout'], 'Low'] - df.loc[df['Buy_Breakout'], 'ATR_14'] * 0.4, mode='markers', marker=dict(symbol='triangle-up', size=14, color='magenta', line=dict(width=1, color='DarkSlateGrey')), name='買：突破'), row=1, col=1)
+        if use_pullback: fig.add_trace(go.Scatter(x=df[df['Buy_Pullback']].index, y=df.loc[df['Buy_Pullback'], 'Low'] - df.loc[df['Buy_Pullback'], 'ATR_14'] * 0.8, mode='markers', marker=dict(symbol='triangle-up', size=13, color='lime', line=dict(width=1, color='DarkSlateGrey')), name='買：KD拉回'), row=1, col=1)
+        if use_ma_bounce: fig.add_trace(go.Scatter(x=df[df['Buy_MABounce']].index, y=df.loc[df['Buy_MABounce'], 'Low'] - df.loc[df['Buy_MABounce'], 'ATR_14'] * 1.2, mode='markers', marker=dict(symbol='triangle-up', size=13, color='dodgerblue', line=dict(width=1, color='DarkSlateGrey')), name='買：20MA回踩'), row=1, col=1)
+        if use_5ma_bounce: fig.add_trace(go.Scatter(x=df[df['Buy_5MABounce']].index, y=df.loc[df['Buy_5MABounce'], 'Low'] - df.loc[df['Buy_5MABounce'], 'ATR_14'] * 1.6, mode='markers', marker=dict(symbol='triangle-up', size=12, color='gold', line=dict(width=1, color='DarkSlateGrey')), name='買：5MA回踩'), row=1, col=1)
+
+        if use_sell_5ma: fig.add_trace(go.Scatter(x=df[df['Sell_5MA']].index, y=df.loc[df['Sell_5MA'], 'High'] + df.loc[df['Sell_5MA'], 'ATR_14'] * 0.4, mode='markers', marker=dict(symbol='triangle-down', size=12, color='red', line=dict(width=1, color='DarkSlateGrey')), name='賣：破5MA'), row=1, col=1)
+        if use_sell_kd: fig.add_trace(go.Scatter(x=df[df['Sell_KD']].index, y=df.loc[df['Sell_KD'], 'High'] + df.loc[df['Sell_KD'], 'ATR_14'] * 0.8, mode='markers', marker=dict(symbol='triangle-down', size=12, color='orange', line=dict(width=1, color='DarkSlateGrey')), name='賣：KD死叉'), row=1, col=1)
+        if use_sell_rsi: fig.add_trace(go.Scatter(x=df[df['Sell_RSI']].index, y=df.loc[df['Sell_RSI'], 'High'] + df.loc[df['Sell_RSI'], 'ATR_14'] * 1.2, mode='markers', marker=dict(symbol='triangle-down', size=12, color='purple', line=dict(width=1, color='DarkSlateGrey')), name='賣：RSI過熱'), row=1, col=1)
+        if use_sell_macd: fig.add_trace(go.Scatter(x=df[df['Sell_MACD']].index, y=df.loc[df['Sell_MACD'], 'High'] + df.loc[df['Sell_MACD'], 'ATR_14'] * 1.6, mode='markers', marker=dict(symbol='triangle-down', size=12, color='blue', line=dict(width=1, color='DarkSlateGrey')), name='賣：MACD死叉'), row=1, col=1)
+        if use_sell_ma: fig.add_trace(go.Scatter(x=df[df['Sell_MA20']].index, y=df.loc[df['Sell_MA20'], 'High'] + df.loc[df['Sell_MA20'], 'ATR_14'] * 2.0, mode='markers', marker=dict(symbol='triangle-down', size=13, color='black', line=dict(width=1, color='DarkSlateGrey')), name='賣：破月線'), row=1, col=1)
+
+        if show_trade_lines:
+            for t in trades_viz:
+                is_profit = t['return'] > 0
+                line_color = "rgba(0, 200, 0, 0.8)" if is_profit else "rgba(255, 0, 0, 0.8)"
+                fill_color = "rgba(0, 200, 0, 0.15)" if is_profit else "rgba(255, 0, 0, 0.15)"
+                bg_color = "green" if is_profit else "red"
+                sign = "+" if is_profit else ""
+                text = f"{sign}{t['diff']:.2f} ({sign}{t['return']:.1f}%)"
+                
+                fig.add_shape(type="rect", x0=t['buy_date'], y0=t['buy_price'], x1=t['sell_date'], y1=t['sell_price'], fillcolor=fill_color, line=dict(color=line_color, width=2), row=1, col=1)
+                fig.add_annotation(x=t['sell_date'], y=t['sell_high'] + t['atr'] * 2.8, text=f"<b>{text}</b>", showarrow=True, arrowhead=1, arrowsize=1, arrowwidth=1, arrowcolor=line_color, ax=0, ay=-30, font=dict(color="white", size=11), bgcolor=bg_color, bordercolor="white", borderwidth=1, borderpad=3, row=1, col=1)
+
         vol_colors = ['red' if c >= o else 'green' for c, o in zip(df['Close'], df['Open'])]
         fig.add_trace(go.Bar(x=df.index, y=df['Volume'], name='成交量', marker_color=vol_colors), row=2, col=1)
         fig.add_trace(go.Scatter(x=df.index, y=df['Vol_5MA'], line=dict(color='orange', width=1.5, dash='dot'), name='5日均量'), row=2, col=1)
@@ -337,18 +441,13 @@ with tab4:
                 bias_60 = ((tw_last['Close'] - tw_last['SMA_60']) / tw_last['SMA_60']) * 100
                 bias_20 = ((tw_last['Close'] - tw_last['SMA_20']) / tw_last['SMA_20']) * 100
 
-                # ==========================================
-                # ★ 雙引擎大盤計分邏輯
-                # ==========================================
                 if "順勢" in trade_style:
-                    # 順勢派：跌破扣分，VIX高扣分
                     s_trend = float(np.clip(40 * (bias_60 + 5) / 10, 0, 40))
                     s_mom = float(np.clip(20 * (bias_20 + 3) / 6, 0, 20))
                     s_bias = float(np.clip(20 - (20 * (bias_20 + 5) / 10), 0, 20))
                     s_vix = float(np.clip(20 - (20 * (vix_last - 15) / 20), 0, 20))
                     t_trend, t_mom, t_bias, t_vix = "季線趨勢 (滿分40%)", "月線動能 (滿分20%)", "乖離過熱度 (滿分20%)", "VIX 安全度 (滿分20%)"
                 else:
-                    # 價值抄底派：跌破越深越高分，VIX越高越高分
                     s_trend = float(np.clip(40 * (-bias_60 + 5) / 10, 0, 40))
                     s_mom = float(np.clip(20 * (-bias_20 + 3) / 6, 0, 20))
                     s_bias = float(np.clip(20 * (-bias_20 + 5) / 10, 0, 20))
@@ -360,8 +459,7 @@ with tab4:
                 st.session_state.market_scores = {
                     'trend': round(s_trend, 1), 'mom': round(s_mom, 1), 
                     'bias': round(s_bias, 1), 'vix': round(s_vix, 1), 
-                    'total': total_score,
-                    'titles': [t_trend, t_mom, t_bias, t_vix]
+                    'total': total_score, 'titles': [t_trend, t_mom, t_bias, t_vix]
                 }
             
             ws_holdings = sh.worksheet("Holdings")
