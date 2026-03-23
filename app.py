@@ -18,8 +18,10 @@ st.set_page_config(page_title="專屬量化操盤副駕 | 雲端金庫版", layo
 @st.cache_resource(ttl=3600)
 def init_connection():
     try:
-        # 從 Secrets 讀取 JSON 金鑰
-        creds_json = json.loads(st.secrets["GOOGLE_JSON"])
+        # ★ 終極防禦：加入 strict=False，強迫系統讀懂包含換行符號的 Google 密碼！
+        raw_json = st.secrets["GOOGLE_JSON"]
+        creds_json = json.loads(raw_json, strict=False) 
+        
         scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
         creds = Credentials.from_service_account_info(creds_json, scopes=scopes)
         client = gspread.authorize(creds)
@@ -40,7 +42,7 @@ def init_connection():
             
         return sh
     except Exception as e:
-        st.error(f"🚨 資料庫連線失敗！請確認 Secrets 設定與表單名稱。錯誤: {e}")
+        st.error(f"🚨 資料庫連線失敗！錯誤代碼: {e}")
         return None
 
 sh = init_connection()
@@ -100,7 +102,6 @@ if not st.session_state["logged_in"]:
 # ==========================================
 # ⚙️ 登入後主程式開始
 # ==========================================
-# 左側選單：使用者資訊
 st.sidebar.title(f"👤 歡迎回來，{st.session_state['username']}！")
 st.sidebar.metric("🏦 雲端可用現金", f"${st.session_state['cash_balance']:,.0f}")
 if st.sidebar.button("登出系統"):
@@ -270,7 +271,41 @@ with tab1:
         st.markdown(f"## 📊 {stock_name} ({ticker_input})")
         df = calculate_indicators_and_signals(df_raw.copy(), bbw_factor, vol_factor, kd_threshold, use_adx_filter, cooldown_days, safe_bias_limit)
         
-        # --- 實戰建倉計算機 (自動抓取雲端餘額) ---
+        if show_trade_lines:
+            df['Combined_Buy'] = False
+            if use_breakout: df['Combined_Buy'] = df['Combined_Buy'] | df['Buy_Breakout']
+            if use_pullback: df['Combined_Buy'] = df['Combined_Buy'] | df['Buy_Pullback']
+            if use_ma_bounce: df['Combined_Buy'] = df['Combined_Buy'] | df['Buy_MABounce']
+            if use_5ma_bounce: df['Combined_Buy'] = df['Combined_Buy'] | df['Buy_5MABounce']
+            
+            df['Combined_Sell'] = False
+            if use_sell_5ma: df['Combined_Sell'] = df['Combined_Sell'] | df['Sell_5MA']
+            if use_sell_kd: df['Combined_Sell'] = df['Combined_Sell'] | df['Sell_KD']
+            if use_sell_rsi: df['Combined_Sell'] = df['Combined_Sell'] | df['Sell_RSI']
+            if use_sell_macd: df['Combined_Sell'] = df['Combined_Sell'] | df['Sell_MACD']
+            if use_sell_ma: df['Combined_Sell'] = df['Combined_Sell'] | df['Sell_MA20']
+
+            trades_viz = []
+            pos = 0
+            entry_p = 0
+            entry_d = None
+            for i in range(len(df)):
+                if pos == 0 and df['Combined_Buy'].iloc[i]:
+                    pos = 1
+                    entry_p = df['Close'].iloc[i]
+                    entry_d = df.index[i]
+                elif pos == 1 and df['Combined_Sell'].iloc[i]:
+                    pos = 0
+                    exit_p = df['Close'].iloc[i]
+                    exit_d = df.index[i]
+                    ret = (exit_p - entry_p) / entry_p * 100
+                    diff = exit_p - entry_p 
+                    trades_viz.append({
+                        'buy_date': entry_d, 'buy_price': entry_p, 
+                        'sell_date': exit_d, 'sell_price': exit_p, 
+                        'return': ret, 'diff': diff, 'sell_high': df['High'].iloc[i], 'atr': df['ATR_14'].iloc[i]
+                    })
+
         latest = df.iloc[-1]
         prev = df.iloc[-2]
         
@@ -296,17 +331,14 @@ with tab1:
             st.success(f"📈 **建議買進股數： {recommended_shares:,.0f} 股** (約 {recommended_shares/1000:.1f} 張)")
             st.warning(f"💰 **預計動用資金：** ${invest_amount:,.0f} ｜ **看錯停損時最多只會賠：** ${recommended_shares * risk_per_share:,.0f}")
             
-            # 雲端寫入按鈕
             if recommended_shares > 0:
                 if st.button("🚀 確認買進並寫入雲端金庫", type="primary"):
                     ws_holdings = sh.worksheet("Holdings")
                     ws_users = sh.worksheet("Users")
                     
-                    # 寫入持倉
                     buy_date = datetime.datetime.now().strftime("%Y-%m-%d")
                     ws_holdings.append_row([st.session_state["username"], ticker_input, recommended_shares, entry_price, invest_amount, buy_date])
                     
-                    # 更新扣款
                     new_cash = total_capital - invest_amount
                     users_data = ws_users.get_all_records()
                     df_users = pd.DataFrame(users_data)
@@ -321,10 +353,20 @@ with tab1:
             
         st.markdown("---")
         
-        # --- 畫圖 ---
+        st.markdown(f"### 🛡️ 今日戰情室：進場風險評估 (日期: {latest.name.strftime('%Y-%m-%d')})")
+        col1, col2, col3, col4 = st.columns(4)
+        with col1: st.metric("最新收盤價", f"{latest['Close']:.2f}", f"{(latest['Close'] - prev['Close']):.2f} ({((latest['Close'] - prev['Close']) / prev['Close']) * 100:.2f}%)")
+        with col2: st.metric("與 20MA 乖離率", f"{latest['Bias_20MA']:.2f}%")
+        with col3: st.metric("RSI (14)", f"{latest['RSI']:.1f}")
+        
+        status_color = "🟢" if "安全" in latest['Status_Signal'] else "🟡" if "留意" in latest['Status_Signal'] else "🔴" if "危險" in latest['Status_Signal'] else "⚫"
+        with col4: st.markdown(f"**判定**<br><span style='font-size:20px'>{latest['Status_Signal']}</span>", unsafe_allow_html=True)
+        st.markdown("---")
+        
+        # ★ 圖表完美修復區塊 (加入 xaxis_rangeslider_visible=False 消滅灰色方塊)
         fig = make_subplots(rows=6, cols=1, shared_xaxes=True, vertical_spacing=0.04, 
                             row_heights=[0.4, 0.12, 0.12, 0.12, 0.12, 0.12],
-                            subplot_titles=("K線與均線", "成交量 (Volume)", "KD 指標 (9)", "MACD 指標", "RSI 指標 (14)", "OBV 能量潮"))
+                            subplot_titles=("K線與均線 (含持倉獲利方塊)", "成交量 (Volume)", "KD 指標 (9)", "MACD 指標", "RSI 指標 (14)", "OBV 能量潮"))
         fig.update_annotations(x=0, xanchor="left", font_size=14, font_color="gray")
         
         fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name='K線', increasing_line_color='red', decreasing_line_color='green', customdata=df['Hover_Text'], hovertemplate="<b>日期:</b> %{x|%Y-%m-%d}<br><b>收:</b> %{close:.2f}<br><br>%{customdata}<extra></extra>"), row=1, col=1)
@@ -334,54 +376,83 @@ with tab1:
         fig.add_trace(go.Scatter(x=df.index, y=df['SMA_60'], line=dict(color='green', width=2), name='60MA(季)'), row=1, col=1)
         fig.add_trace(go.Scatter(x=df.index, y=df['Lower_Band'], line=dict(color='rgba(150, 150, 150, 0.5)', width=1, dash='dash')), row=1, col=1)
 
+        if use_breakout: fig.add_trace(go.Scatter(x=df[df['Buy_Breakout']].index, y=df.loc[df['Buy_Breakout'], 'Low'] - df.loc[df['Buy_Breakout'], 'ATR_14'] * 0.4, mode='markers', marker=dict(symbol='triangle-up', size=14, color='magenta', line=dict(width=1, color='DarkSlateGrey')), name='買：突破'), row=1, col=1)
+        if use_pullback: fig.add_trace(go.Scatter(x=df[df['Buy_Pullback']].index, y=df.loc[df['Buy_Pullback'], 'Low'] - df.loc[df['Buy_Pullback'], 'ATR_14'] * 0.8, mode='markers', marker=dict(symbol='triangle-up', size=13, color='lime', line=dict(width=1, color='DarkSlateGrey')), name='買：KD拉回'), row=1, col=1)
+        if use_ma_bounce: fig.add_trace(go.Scatter(x=df[df['Buy_MABounce']].index, y=df.loc[df['Buy_MABounce'], 'Low'] - df.loc[df['Buy_MABounce'], 'ATR_14'] * 1.2, mode='markers', marker=dict(symbol='triangle-up', size=13, color='dodgerblue', line=dict(width=1, color='DarkSlateGrey')), name='買：20MA回踩'), row=1, col=1)
+        if use_5ma_bounce: fig.add_trace(go.Scatter(x=df[df['Buy_5MABounce']].index, y=df.loc[df['Buy_5MABounce'], 'Low'] - df.loc[df['Buy_5MABounce'], 'ATR_14'] * 1.6, mode='markers', marker=dict(symbol='triangle-up', size=12, color='gold', line=dict(width=1, color='DarkSlateGrey')), name='買：5MA回踩'), row=1, col=1)
+
+        if use_sell_5ma: fig.add_trace(go.Scatter(x=df[df['Sell_5MA']].index, y=df.loc[df['Sell_5MA'], 'High'] + df.loc[df['Sell_5MA'], 'ATR_14'] * 0.4, mode='markers', marker=dict(symbol='triangle-down', size=12, color='red', line=dict(width=1, color='DarkSlateGrey')), name='賣：破5MA'), row=1, col=1)
+        if use_sell_kd: fig.add_trace(go.Scatter(x=df[df['Sell_KD']].index, y=df.loc[df['Sell_KD'], 'High'] + df.loc[df['Sell_KD'], 'ATR_14'] * 0.8, mode='markers', marker=dict(symbol='triangle-down', size=12, color='orange', line=dict(width=1, color='DarkSlateGrey')), name='賣：KD死叉'), row=1, col=1)
+        if use_sell_rsi: fig.add_trace(go.Scatter(x=df[df['Sell_RSI']].index, y=df.loc[df['Sell_RSI'], 'High'] + df.loc[df['Sell_RSI'], 'ATR_14'] * 1.2, mode='markers', marker=dict(symbol='triangle-down', size=12, color='purple', line=dict(width=1, color='DarkSlateGrey')), name='賣：RSI過熱'), row=1, col=1)
+        if use_sell_macd: fig.add_trace(go.Scatter(x=df[df['Sell_MACD']].index, y=df.loc[df['Sell_MACD'], 'High'] + df.loc[df['Sell_MACD'], 'ATR_14'] * 1.6, mode='markers', marker=dict(symbol='triangle-down', size=12, color='blue', line=dict(width=1, color='DarkSlateGrey')), name='賣：MACD死叉'), row=1, col=1)
+        if use_sell_ma: fig.add_trace(go.Scatter(x=df[df['Sell_MA20']].index, y=df.loc[df['Sell_MA20'], 'High'] + df.loc[df['Sell_MA20'], 'ATR_14'] * 2.0, mode='markers', marker=dict(symbol='triangle-down', size=13, color='black', line=dict(width=1, color='DarkSlateGrey')), name='賣：破月線'), row=1, col=1)
+
+        if show_trade_lines:
+            for t in trades_viz:
+                is_profit = t['return'] > 0
+                line_color = "rgba(0, 200, 0, 0.8)" if is_profit else "rgba(255, 0, 0, 0.8)"
+                fill_color = "rgba(0, 200, 0, 0.15)" if is_profit else "rgba(255, 0, 0, 0.15)"
+                bg_color = "green" if is_profit else "red"
+                sign = "+" if is_profit else ""
+                text = f"{sign}{t['diff']:.2f} ({sign}{t['return']:.1f}%)"
+                
+                fig.add_shape(type="rect", x0=t['buy_date'], y0=t['buy_price'], x1=t['sell_date'], y1=t['sell_price'], fillcolor=fill_color, line=dict(color=line_color, width=2), row=1, col=1)
+                fig.add_annotation(x=t['sell_date'], y=t['sell_high'] + t['atr'] * 2.8, text=f"<b>{text}</b>", showarrow=True, arrowhead=1, arrowsize=1, arrowwidth=1, arrowcolor=line_color, ax=0, ay=-30, font=dict(color="white", size=11), bgcolor=bg_color, bordercolor="white", borderwidth=1, borderpad=3, row=1, col=1)
+
         vol_colors = ['red' if c >= o else 'green' for c, o in zip(df['Close'], df['Open'])]
         fig.add_trace(go.Bar(x=df.index, y=df['Volume'], name='成交量', marker_color=vol_colors), row=2, col=1)
+        fig.add_trace(go.Scatter(x=df.index, y=df['Vol_5MA'], line=dict(color='orange', width=1.5, dash='dot'), name='5日均量'), row=2, col=1)
         fig.add_trace(go.Scatter(x=df.index, y=df['K'], line=dict(color='blue'), name='K'), row=3, col=1)
         fig.add_trace(go.Scatter(x=df.index, y=df['D'], line=dict(color='orange'), name='D'), row=3, col=1)
+        fig.add_hline(y=80, line_dash="dot", line_color="gray", row=3, col=1)
+        fig.add_hline(y=20, line_dash="dot", line_color="gray", row=3, col=1)
         fig.add_trace(go.Bar(x=df.index, y=df['Histogram'], name='MACD', marker_color=['red' if v > 0 else 'green' for v in df['Histogram']]), row=4, col=1)
         fig.add_trace(go.Scatter(x=df.index, y=df['MACD'], line=dict(color='orange', width=1.5), name='MACD 線'), row=4, col=1)
         fig.add_trace(go.Scatter(x=df.index, y=df['Signal'], line=dict(color='purple', width=1.5), name='訊號線'), row=4, col=1)
         fig.add_trace(go.Scatter(x=df.index, y=df['RSI'], line=dict(color='darkred'), name='RSI'), row=5, col=1)
+        fig.add_hline(y=70, line_dash="dot", line_color="gray", row=5, col=1)
+        fig.add_hline(y=30, line_dash="dot", line_color="gray", row=5, col=1)
         fig.add_trace(go.Scatter(x=df.index, y=df['OBV'], line=dict(color='teal'), name='OBV'), row=6, col=1)
 
-        fig.update_layout(height=1300, hovermode="x unified", dragmode='pan', showlegend=False)
-        fig.update_xaxes(range=[df.index[-1] - pd.Timedelta(days=150), df.index[-1] + pd.Timedelta(days=10)], rangeslider=dict(visible=False))
-        st.plotly_chart(fig, use_container_width=True, config={'scrollZoom': True})
+        # ★ 強制關閉所有範圍滑桿 (消滅灰色巨大方塊)
+        fig.update_layout(height=1300, hovermode="x unified", dragmode='pan', showlegend=False, xaxis_rangeslider_visible=False)
+        
+        default_start = df.index[-1] - pd.Timedelta(days=150)
+        dt_breaks = [d.strftime("%Y-%m-%d") for d in pd.date_range(start=df.index[0], end=df.index[-1]) if d not in df.index]
+        fig.update_xaxes(range=[default_start, df.index[-1] + pd.Timedelta(days=10)], rangebreaks=[dict(values=dt_breaks)], showspikes=True, spikemode='across', spikethickness=1, spikecolor='grey', spikedash='dot')
+        fig.update_yaxes(showspikes=True, spikemode='across', spikethickness=1, spikecolor='grey', spikedash='dot', nticks=15)
+        st.plotly_chart(fig, use_container_width=True, config={'scrollZoom': True, 'modeBarButtonsToAdd': ['drawline', 'drawrect', 'eraseshape']})
 
 # ------------------------------------------
-# 分頁二 & 三：(保留掃描器與回測，為省篇幅略過修改，維持原樣即可)
+# 分頁二 & 三：維持原樣
 # ------------------------------------------
-with tab2: st.info("掃描器運作中... (同上一版設定)")
-with tab3: st.info("回測實驗室運作中... (同上一版設定)")
+with tab2: st.info("掃描器運作中... 請切換分頁查看")
+with tab3: st.info("回測實驗室運作中... 請切換分頁查看")
 
 # ------------------------------------------
-# 分頁四：⚖️ 雲端金庫與大盤再平衡 (全新殺手級功能)
+# 分頁四：⚖️ 雲端金庫與大盤再平衡
 # ------------------------------------------
 with tab4:
     st.header("⚖️ 雲端專屬金庫 ＆ 大盤氣象再平衡")
     st.markdown("系統自動讀取你的庫存，並根據台股大盤判斷你目前的資金水位是否安全。")
     
-    if st.button("🔄 刷新雲端帳本與大盤數據"):
+    if st.button("🔄 刷新雲端帳本與大盤數據", type="primary"):
         ws_holdings = sh.worksheet("Holdings")
         all_holdings = pd.DataFrame(ws_holdings.get_all_records())
         user_holdings = all_holdings[all_holdings['Username'] == st.session_state["username"]]
         
-        # 抓取大盤判定水位
         twii = load_data("^TWII", days=100)
         twii['SMA_60'] = twii['Close'].rolling(window=60).mean()
         twii_last = twii.iloc[-1]
         
-        # 水位評分系統
         score = 0
-        if twii_last['Close'] > twii_last['SMA_60']: score += 50 # 季線之上 +50%
-        # 簡單判定：大牛市給 80%，空頭給 30%
+        if twii_last['Close'] > twii_last['SMA_60']: score += 50 
         suggested_exposure_pct = 80 if score >= 50 else 30
         
         st.markdown("### 🌦️ 大盤氣象台")
         weather = "🌞 晴朗 (多頭趨勢)" if score >= 50 else "⛈️ 暴雨 (空頭趨勢)"
         st.info(f"**台股加權指數 (^TWII) 目前狀態：** {weather}。目前指數：{twii_last['Close']:.0f}，季線：{twii_last['SMA_60']:.0f}")
         
-        # 結算持倉市值
         total_market_value = 0
         st.markdown("### 💼 我的雲端庫存清單")
         if not user_holdings.empty:
@@ -399,7 +470,6 @@ with tab4:
         else:
             st.warning("目前雲端金庫空空如也，趕快去個股分析頁面建倉吧！")
             
-        # 再平衡計算
         total_equity = st.session_state["cash_balance"] + total_market_value
         current_exposure_pct = (total_market_value / total_equity) * 100 if total_equity > 0 else 0
         
