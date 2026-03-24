@@ -143,6 +143,8 @@ def calculate_indicators(df, bbw_f, vol_f, kd_thresh, use_adx, cooldown, bias_li
         "判定: <b>" + df['Status_Signal'] + "</b>"
     )
     
+    df['Hover_Y'] = df['High'].rolling(30, center=True, min_periods=1).max() + (df['High'] - df['Low']).ewm(alpha=1/14, adjust=False).mean() * 2.5
+    
     df['TR'] = np.maximum(df['High'] - df['Low'], np.maximum(abs(df['High'] - df['Close'].shift(1)), abs(df['Low'] - df['Close'].shift(1))))
     df['+DM'] = np.where((df['High'] - df['High'].shift(1)) > (df['Low'].shift(1) - df['Low']), np.maximum(df['High'] - df['High'].shift(1), 0), 0)
     df['-DM'] = np.where((df['Low'].shift(1) - df['Low']) > (df['High'] - df['High'].shift(1)), np.maximum(df['Low'].shift(1) - df['Low'], 0), 0)
@@ -152,26 +154,29 @@ def calculate_indicators(df, bbw_f, vol_f, kd_thresh, use_adx, cooldown, bias_li
     df['DX'] = 100 * abs(df['+DI'] - df['-DI']) / (df['+DI'] + df['-DI'])
     df['ADX'] = df['DX'].ewm(alpha=1/14, adjust=False).mean()
     
-    # ★ 完美防擋黑科技：動態計算天花板位置 (局部最高點 + 2.5倍 ATR)
-    df['Hover_Y'] = df['High'].rolling(30, center=True, min_periods=1).max() + df['ATR_14'] * 2.5
-    
     adx_cond = (df['ADX'] > 20) if use_adx else True
     df['Vol_5MA'] = df['Volume'].rolling(5).mean()
     
+    # 買點
     df['Breakout_Raw'] = (df['BBW'] <= df['BBW'].rolling(20).min() * bbw_f).rolling(5).max().fillna(0).astype(bool) & (df['Close'] > df['Upper_Band']) & (df['Volume'] > df['Vol_5MA'] * vol_f) & (df['Close'] > df['SMA_60']) & adx_cond
     df['Pullback_Raw'] = (df['K'] > df['D']) & (df['K'].shift(1) <= df['D'].shift(1)) & (df['K'] <= kd_thresh) & (df['Close'] > df['SMA_60']) & adx_cond
     df['MABounce_Raw'] = (df['SMA_5'] > df['SMA_20']) & (df['SMA_20'] > df['SMA_60']) & (df['Low'] <= (df['SMA_20'] * 1.015)) & (df['Close'] > df['SMA_20']) & (df['Close'] > df['Open']) & adx_cond
     df['5MABounce_Raw'] = (df['SMA_5'] > df['SMA_20']) & (df['Close'] > df['SMA_20']) & (df['Low'] <= (df['SMA_5'] * 1.015)) & (df['Close'] > df['SMA_5']) & (df['Close'] > df['Open']) & adx_cond
 
+    # ★ 賣點 (全面升級敏銳度)
     df['Sell_5MA_Raw'] = (df['Close'] < df['SMA_5']) & (df['Close'].shift(1) >= df['SMA_5'].shift(1))
-    df['Sell_KD_Raw'] = (df['K'] < df['D']) & (df['K'].shift(1) >= df['D'].shift(1)) & (df['K'].shift(1) >= 80)
+    df['Sell_10MA_Raw'] = (df['Close'] < df['SMA_10']) & (df['Close'].shift(1) >= df['SMA_10'].shift(1)) # 新增 10MA 賣點
+    df['Sell_BB_Raw'] = (df['High'] >= df['Upper_Band']) & (df['Close'] < df['Open']) # 新增觸碰上軌收黑K停利
+    df['Sell_KD_Raw'] = (df['K'] < df['D']) & (df['K'].shift(1) >= df['D'].shift(1)) & (df['K'].shift(1) >= 70) # KD 條件放寬到 70
     df['Sell_RSI_Raw'] = (df['RSI'] < 70) & (df['RSI'].shift(1) >= 70)
     df['Sell_MACD_Raw'] = (df['MACD'] < df['Signal']) & (df['MACD'].shift(1) >= df['Signal'].shift(1))
     df['Sell_MA20_Raw'] = (df['Close'] < df['SMA_20']) & (df['Close'].shift(1) >= df['SMA_20'].shift(1))
 
     df['Buy_Breakout'] = apply_cooldown(df['Breakout_Raw'], cooldown); df['Buy_Pullback'] = apply_cooldown(df['Pullback_Raw'], cooldown)
     df['Buy_MABounce'] = apply_cooldown(df['MABounce_Raw'], cooldown); df['Buy_5MABounce'] = apply_cooldown(df['5MABounce_Raw'], cooldown)
-    df['Sell_5MA'] = apply_cooldown(df['Sell_5MA_Raw'], cooldown); df['Sell_KD'] = apply_cooldown(df['Sell_KD_Raw'], cooldown)
+    
+    df['Sell_5MA'] = apply_cooldown(df['Sell_5MA_Raw'], cooldown); df['Sell_10MA'] = apply_cooldown(df['Sell_10MA_Raw'], cooldown)
+    df['Sell_BB'] = apply_cooldown(df['Sell_BB_Raw'], cooldown); df['Sell_KD'] = apply_cooldown(df['Sell_KD_Raw'], cooldown)
     df['Sell_RSI'] = apply_cooldown(df['Sell_RSI_Raw'], cooldown); df['Sell_MACD'] = apply_cooldown(df['Sell_MACD_Raw'], cooldown)
     df['Sell_MA20'] = apply_cooldown(df['Sell_MA20_Raw'], cooldown)
     return df
@@ -253,26 +258,28 @@ st.sidebar.markdown("---")
 st.sidebar.title("⚙️ 策略參數控制台")
 show_trade_lines = st.sidebar.checkbox("開啟【買賣區間透視方塊】", value=True)
 use_adx_filter = st.sidebar.checkbox("開啟【ADX 趨勢過濾】", value=True)
-cooldown_days = st.sidebar.slider("訊號冷卻天數 (建議：5天)", 1, 10, 5)
-safe_bias_limit = st.sidebar.slider("進場安全乖離率上限 (%) (建議：5.0)", 1.0, 15.0, 5.0)
+cooldown_days = st.sidebar.slider("訊號冷卻天數", 1, 10, 5)
+safe_bias_limit = st.sidebar.slider("進場安全乖離率上限 (%)", 1.0, 15.0, 5.0)
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("🎯 買點設定 (向上箭頭 ▲)")
-use_breakout = st.sidebar.checkbox("開啟【壓縮突破】買點 (桃紅 ▲)", value=True)
+use_breakout = st.sidebar.checkbox("開啟【壓縮突破】(桃紅 ▲)", value=True)
 bbw_factor = st.sidebar.slider("└ 布林壓縮容錯率", 1.0, 1.5, 1.1)
 vol_factor = st.sidebar.slider("└ 成交量爆發倍數", 1.0, 3.0, 1.5)
-use_pullback = st.sidebar.checkbox("開啟【多頭拉回】買點 (綠色 ▲)", value=False)
+use_pullback = st.sidebar.checkbox("開啟【多頭拉回】(綠色 ▲)", value=False)
 kd_threshold = st.sidebar.slider("└ KD 金叉最高位階", 20, 80, 50)
-use_ma_bounce = st.sidebar.checkbox("開啟【20MA 回踩】波段買點 (淺藍 ▲)", value=True)
-use_5ma_bounce = st.sidebar.checkbox("開啟【5MA 回踩】飆股買點 (黃色 ▲)", value=False)
+use_ma_bounce = st.sidebar.checkbox("開啟【20MA 回踩】(淺藍 ▲)", value=True)
+use_5ma_bounce = st.sidebar.checkbox("開啟【5MA 回踩】(黃色 ▲)", value=False)
 
 st.sidebar.markdown("---")
-st.sidebar.subheader("🛑 賣點設定 (向下箭頭 ▼)")
+st.sidebar.subheader("🛑 賣點設定 (短線波段升級 ▼)")
+use_sell_bb = st.sidebar.checkbox("開啟【觸碰上軌】達標停利 (粉紅 ▼)", value=True) # ★ 新增
 use_sell_5ma = st.sidebar.checkbox("開啟【跌破 5MA】極短線停利 (紅色 ▼)", value=False)
-use_sell_kd = st.sidebar.checkbox("開啟【KD 高檔死叉】短線停利 (橘色 ▼)", value=False)
+use_sell_10ma = st.sidebar.checkbox("開啟【跌破 10MA】波段防守 (青色 ▼)", value=True) # ★ 新增
+use_sell_kd = st.sidebar.checkbox("開啟【KD 死叉】敏銳停利 (橘色 ▼)", value=False)
 use_sell_rsi = st.sidebar.checkbox("開啟【RSI 跌破 70】過熱出場 (紫色 ▼)", value=False)
-use_sell_macd = st.sidebar.checkbox("開啟【MACD 死叉】波段轉弱 (深藍 ▼)", value=True)
-use_sell_ma = st.sidebar.checkbox("開啟【跌破 20MA】波段停損 (黑色 ▼)", value=True)
+use_sell_macd = st.sidebar.checkbox("開啟【MACD 死叉】長線轉弱 (深藍 ▼)", value=False) # 預設關閉長線
+use_sell_ma = st.sidebar.checkbox("開啟【跌破 20MA】長線停損 (黑色 ▼)", value=False) # 預設關閉長線
 
 # ==========================================
 # 🗂️ 建立分頁
@@ -399,28 +406,14 @@ with tab1:
         st.markdown("---")
         
         # ==========================================
-        # ★ 完美繪圖區：筋斗雲錨點 + 自由游標
+        # ★ 繪圖區：動態賣點連動
         # ==========================================
         ohlc_title = f"開={latest['Open']:.2f} 高={latest['High']:.2f} 低={latest['Low']:.2f} 收={latest['Close']:.2f}  {sign}{diff:.2f} ({sign}{diff_pct:.2f}%)"
-        fig = make_subplots(rows=6, cols=1, shared_xaxes=True, vertical_spacing=0.04, row_heights=[0.4, 0.12, 0.12, 0.12, 0.12, 0.12], 
-                            subplot_titles=(ohlc_title, "成交量", "KD", "MACD", "RSI", "OBV"))
+        fig = make_subplots(rows=6, cols=1, shared_xaxes=True, vertical_spacing=0.04, row_heights=[0.4, 0.12, 0.12, 0.12, 0.12, 0.12], subplot_titles=(ohlc_title, "成交量", "KD", "MACD", "RSI", "OBV"))
         
-        # 1. 真實 K 線 (關閉原生 hover，不擋視線)
-        fig.add_trace(go.Candlestick(
-            x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], 
-            name='K線', increasing_line_color='red', decreasing_line_color='green', 
-            showlegend=False, hoverinfo='skip'
-        ), row=1, col=1)
+        fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name='K線', increasing_line_color='red', decreasing_line_color='green', showlegend=False, hoverinfo='skip'), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df.index, y=df['Hover_Y'], mode='markers', marker=dict(color='rgba(0,0,0,0)', size=1), showlegend=False, customdata=df['Hover_Text'], hovertemplate="<b>日期: %{x|%Y-%m-%d}</b><br>%{customdata}<extra></extra>"), row=1, col=1)
         
-        # 2. ★ 魔法筋斗雲錨點 (掛在 K 棒頭頂上方 2.5倍 ATR 的位置)
-        fig.add_trace(go.Scatter(
-            x=df.index, y=df['Hover_Y'], 
-            mode='markers', marker=dict(color='rgba(0,0,0,0)', size=1), # 完全隱形
-            showlegend=False, customdata=df['Hover_Text'], 
-            hovertemplate="<b>日期: %{x|%Y-%m-%d}</b><br>%{customdata}<extra></extra>"
-        ), row=1, col=1)
-        
-        # 3. 均線與布林通道
         fig.add_trace(go.Scatter(x=df.index, y=df['Upper_Band'], line=dict(color='rgba(150,150,150,0.5)', width=1, dash='dash'), hoverinfo='skip', showlegend=False), row=1, col=1)
         fig.add_trace(go.Scatter(x=df.index, y=df['SMA_5'], line=dict(color='magenta', width=1.5), name=f"MA 5  {latest['SMA_5']:.2f}", hoverinfo='skip', showlegend=True), row=1, col=1) 
         fig.add_trace(go.Scatter(x=df.index, y=df['SMA_10'], line=dict(color='deepskyblue', width=1.5), name=f"MA 10  {latest['SMA_10']:.2f}", hoverinfo='skip', showlegend=True), row=1, col=1) 
@@ -428,18 +421,22 @@ with tab1:
         fig.add_trace(go.Scatter(x=df.index, y=df['SMA_60'], line=dict(color='green', width=2), name=f"MA 60  {latest['SMA_60']:.2f}", hoverinfo='skip', showlegend=True), row=1, col=1)
         fig.add_trace(go.Scatter(x=df.index, y=df['Lower_Band'], line=dict(color='rgba(150,150,150,0.5)', width=1, dash='dash'), hoverinfo='skip', showlegend=False), row=1, col=1)
 
-        # 4. 買賣點標籤
+        # 買賣點標籤
         if use_breakout: fig.add_trace(go.Scatter(x=df[df['Buy_Breakout']].index, y=df.loc[df['Buy_Breakout'], 'Low'] - df.loc[df['Buy_Breakout'], 'ATR_14']*0.4, mode='markers', marker=dict(symbol='triangle-up', size=14, color='magenta', line=dict(width=1, color='black')), hoverinfo='skip', showlegend=False), row=1, col=1)
         if use_pullback: fig.add_trace(go.Scatter(x=df[df['Buy_Pullback']].index, y=df.loc[df['Buy_Pullback'], 'Low'] - df.loc[df['Buy_Pullback'], 'ATR_14']*0.8, mode='markers', marker=dict(symbol='triangle-up', size=13, color='lime', line=dict(width=1, color='black')), hoverinfo='skip', showlegend=False), row=1, col=1)
         if use_ma_bounce: fig.add_trace(go.Scatter(x=df[df['Buy_MABounce']].index, y=df.loc[df['Buy_MABounce'], 'Low'] - df.loc[df['Buy_MABounce'], 'ATR_14']*1.2, mode='markers', marker=dict(symbol='triangle-up', size=13, color='dodgerblue', line=dict(width=1, color='black')), hoverinfo='skip', showlegend=False), row=1, col=1)
         if use_5ma_bounce: fig.add_trace(go.Scatter(x=df[df['Buy_5MABounce']].index, y=df.loc[df['Buy_5MABounce'], 'Low'] - df.loc[df['Buy_5MABounce'], 'ATR_14']*1.6, mode='markers', marker=dict(symbol='triangle-up', size=12, color='gold', line=dict(width=1, color='black')), hoverinfo='skip', showlegend=False), row=1, col=1)
-        if use_sell_5ma: fig.add_trace(go.Scatter(x=df[df['Sell_5MA']].index, y=df.loc[df['Sell_5MA'], 'High'] + df.loc[df['Sell_5MA'], 'ATR_14']*0.4, mode='markers', marker=dict(symbol='triangle-down', size=12, color='red', line=dict(width=1, color='black')), hoverinfo='skip', showlegend=False), row=1, col=1)
-        if use_sell_kd: fig.add_trace(go.Scatter(x=df[df['Sell_KD']].index, y=df.loc[df['Sell_KD'], 'High'] + df.loc[df['Sell_KD'], 'ATR_14']*0.8, mode='markers', marker=dict(symbol='triangle-down', size=12, color='orange', line=dict(width=1, color='black')), hoverinfo='skip', showlegend=False), row=1, col=1)
-        if use_sell_rsi: fig.add_trace(go.Scatter(x=df[df['Sell_RSI']].index, y=df.loc[df['Sell_RSI'], 'High'] + df.loc[df['Sell_RSI'], 'ATR_14']*1.2, mode='markers', marker=dict(symbol='triangle-down', size=12, color='purple', line=dict(width=1, color='black')), hoverinfo='skip', showlegend=False), row=1, col=1)
-        if use_sell_macd: fig.add_trace(go.Scatter(x=df[df['Sell_MACD']].index, y=df.loc[df['Sell_MACD'], 'High'] + df.loc[df['Sell_MACD'], 'ATR_14']*1.6, mode='markers', marker=dict(symbol='triangle-down', size=12, color='blue', line=dict(width=1, color='black')), hoverinfo='skip', showlegend=False), row=1, col=1)
-        if use_sell_ma: fig.add_trace(go.Scatter(x=df[df['Sell_MA20']].index, y=df.loc[df['Sell_MA20'], 'High'] + df.loc[df['Sell_MA20'], 'ATR_14']*2.0, mode='markers', marker=dict(symbol='triangle-down', size=13, color='black', line=dict(width=1, color='black')), hoverinfo='skip', showlegend=False), row=1, col=1)
+        
+        # 新增的賣點標籤
+        if use_sell_bb: fig.add_trace(go.Scatter(x=df[df['Sell_BB']].index, y=df.loc[df['Sell_BB'], 'High'] + df.loc[df['Sell_BB'], 'ATR_14']*0.4, mode='markers', marker=dict(symbol='triangle-down', size=12, color='hotpink', line=dict(width=1, color='black')), hoverinfo='skip', showlegend=False), row=1, col=1)
+        if use_sell_5ma: fig.add_trace(go.Scatter(x=df[df['Sell_5MA']].index, y=df.loc[df['Sell_5MA'], 'High'] + df.loc[df['Sell_5MA'], 'ATR_14']*0.8, mode='markers', marker=dict(symbol='triangle-down', size=12, color='red', line=dict(width=1, color='black')), hoverinfo='skip', showlegend=False), row=1, col=1)
+        if use_sell_10ma: fig.add_trace(go.Scatter(x=df[df['Sell_10MA']].index, y=df.loc[df['Sell_10MA'], 'High'] + df.loc[df['Sell_10MA'], 'ATR_14']*1.2, mode='markers', marker=dict(symbol='triangle-down', size=12, color='cyan', line=dict(width=1, color='black')), hoverinfo='skip', showlegend=False), row=1, col=1)
+        if use_sell_kd: fig.add_trace(go.Scatter(x=df[df['Sell_KD']].index, y=df.loc[df['Sell_KD'], 'High'] + df.loc[df['Sell_KD'], 'ATR_14']*1.6, mode='markers', marker=dict(symbol='triangle-down', size=12, color='orange', line=dict(width=1, color='black')), hoverinfo='skip', showlegend=False), row=1, col=1)
+        if use_sell_rsi: fig.add_trace(go.Scatter(x=df[df['Sell_RSI']].index, y=df.loc[df['Sell_RSI'], 'High'] + df.loc[df['Sell_RSI'], 'ATR_14']*2.0, mode='markers', marker=dict(symbol='triangle-down', size=12, color='purple', line=dict(width=1, color='black')), hoverinfo='skip', showlegend=False), row=1, col=1)
+        if use_sell_macd: fig.add_trace(go.Scatter(x=df[df['Sell_MACD']].index, y=df.loc[df['Sell_MACD'], 'High'] + df.loc[df['Sell_MACD'], 'ATR_14']*2.4, mode='markers', marker=dict(symbol='triangle-down', size=12, color='blue', line=dict(width=1, color='black')), hoverinfo='skip', showlegend=False), row=1, col=1)
+        if use_sell_ma: fig.add_trace(go.Scatter(x=df[df['Sell_MA20']].index, y=df.loc[df['Sell_MA20'], 'High'] + df.loc[df['Sell_MA20'], 'ATR_14']*2.8, mode='markers', marker=dict(symbol='triangle-down', size=13, color='black', line=dict(width=1, color='black')), hoverinfo='skip', showlegend=False), row=1, col=1)
 
-        # 5. 獲利方塊透視
+        # ★ 動態方塊透視
         if show_trade_lines:
             df['CBuy'] = False
             if use_breakout: df['CBuy'] |= df['Buy_Breakout']
@@ -448,7 +445,9 @@ with tab1:
             if use_5ma_bounce: df['CBuy'] |= df['Buy_5MABounce']
             
             df['CSell'] = False
+            if use_sell_bb: df['CSell'] |= df['Sell_BB']
             if use_sell_5ma: df['CSell'] |= df['Sell_5MA']
+            if use_sell_10ma: df['CSell'] |= df['Sell_10MA']
             if use_sell_kd: df['CSell'] |= df['Sell_KD']
             if use_sell_rsi: df['CSell'] |= df['Sell_RSI']
             if use_sell_macd: df['CSell'] |= df['Sell_MACD']
@@ -462,9 +461,8 @@ with tab1:
                     ret = (xp - ep)/ep * 100
                     lc, fc, bg = ("rgba(255,0,0,0.8)", "rgba(255,0,0,0.15)", "red") if ret > 0 else ("rgba(0,200,0,0.8)", "rgba(0,200,0,0.15)", "green")
                     fig.add_shape(type="rect", x0=ed, y0=ep, x1=df.index[i], y1=xp, fillcolor=fc, line=dict(color=lc, width=2), row=1, col=1)
-                    fig.add_annotation(x=df.index[i], y=df['High'].iloc[i] + df['ATR_14'].iloc[i]*2.8, text=f"<b>{xp-ep:.2f} ({ret:.1f}%)</b>", showarrow=True, arrowhead=1, arrowcolor=lc, ax=0, ay=-30, font=dict(color="white", size=11), bgcolor=bg, row=1, col=1)
+                    fig.add_annotation(x=df.index[i], y=df['High'].iloc[i] + df['ATR_14'].iloc[i]*3.5, text=f"<b>{xp-ep:.2f} ({ret:.1f}%)</b>", showarrow=True, arrowhead=1, arrowcolor=lc, ax=0, ay=-30, font=dict(color="white", size=11), bgcolor=bg, row=1, col=1)
 
-        # 6. 副圖設定 (皆關閉 hover)
         vol_colors = ['red' if c >= o else 'green' for c, o in zip(df['Close'], df['Open'])]
         fig.add_trace(go.Bar(x=df.index, y=df['Volume'], marker_color=vol_colors, hoverinfo='skip', showlegend=False), row=2, col=1)
         fig.add_trace(go.Scatter(x=df.index, y=df['Vol_5MA'], line=dict(color='orange', dash='dot'), hoverinfo='skip', showlegend=False), row=2, col=1)
@@ -476,24 +474,12 @@ with tab1:
         fig.add_trace(go.Scatter(x=df.index, y=df['RSI'], line=dict(color='darkred'), hoverinfo='skip', showlegend=False), row=5, col=1)
         fig.add_trace(go.Scatter(x=df.index, y=df['OBV'], line=dict(color='teal'), hoverinfo='skip', showlegend=False), row=6, col=1)
         
-        # ★ 游標設定：X 軸吸附時間(data)，Y 軸跟隨滑鼠(cursor)，完美十字線！
         dt_breaks = [d.strftime("%Y-%m-%d") for d in pd.date_range(start=df.index[0], end=df.index[-1]) if d not in df.index]
-        fig.update_xaxes(
-            showspikes=True, spikemode='across', spikesnap='data', spikethickness=1, spikedash='dot', spikecolor='gray',
-            range=[df.index[-1] - pd.Timedelta(days=150), df.index[-1] + pd.Timedelta(days=10)], rangebreaks=[dict(values=dt_breaks)]
-        )
-        fig.update_yaxes(
-            showspikes=True, spikemode='across', spikesnap='cursor', spikethickness=1, spikedash='dot', spikecolor='gray'
-        )
-        
-        # hovermode="x" 會讓資訊框尋找 X 軸上的資料點，而我們唯一有資料點的就是天花板上的隱形錨點！
-        fig.update_layout(
-            height=1300, hovermode="x", dragmode='pan', xaxis_rangeslider_visible=False,
-            legend=dict(orientation="v", yanchor="top", y=1.0, xanchor="left", x=0.005, bgcolor="rgba(255,255,255,0.7)", font=dict(size=12))
-        )
+        fig.update_xaxes(showspikes=True, spikemode='across', spikesnap='data', spikethickness=1, spikedash='dot', spikecolor='gray', range=[df.index[-1] - pd.Timedelta(days=150), df.index[-1] + pd.Timedelta(days=10)], rangebreaks=[dict(values=dt_breaks)])
+        fig.update_yaxes(showspikes=True, spikemode='across', spikesnap='cursor', spikethickness=1, spikedash='dot', spikecolor='gray')
+        fig.update_layout(height=1300, hovermode="x", dragmode='pan', xaxis_rangeslider_visible=False, legend=dict(orientation="v", yanchor="top", y=1.0, xanchor="left", x=0.005, bgcolor="rgba(255,255,255,0.7)", font=dict(size=12)))
         st.plotly_chart(fig, use_container_width=True, config={'scrollZoom': True})
-    else:
-        st.warning("⚠️ 找不到該股票代碼，請確認代碼是否正確。")
+    else: st.warning("⚠️ 找不到該股票代碼，請確認代碼是否正確。")
 
 # ------------------------------------------
 # 分頁二：🚀 策略選股掃描器 
