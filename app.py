@@ -107,7 +107,7 @@ def apply_cooldown(signal_series, cooldown_period):
 def calculate_indicators(df, bbw_f, vol_f, kd_thresh, use_adx, cooldown, bias_limit):
     if len(df) < 60: return df 
     df['SMA_5'] = df['Close'].rolling(5).mean()
-    df['SMA_10'] = df['Close'].rolling(10).mean() # ★ 新增 10MA
+    df['SMA_10'] = df['Close'].rolling(10).mean()
     df['SMA_20'] = df['Close'].rolling(20).mean()
     df['SMA_60'] = df['Close'].rolling(60).mean()
     df['STD_20'] = df['Close'].rolling(20).std()
@@ -133,7 +133,16 @@ def calculate_indicators(df, bbw_f, vol_f, kd_thresh, use_adx, cooldown, bias_li
     
     conditions = [(df['RSI'] >= 70) | (df['Bias_20MA'] >= bias_limit), (df['RSI'] >= 60) | (df['Bias_20MA'] >= (bias_limit * 0.7)), (df['Close'] < df['SMA_60'])]
     df['Status_Signal'] = np.select(conditions, ["🔴 極度危險", "🟡 留意拉回", "⚫ 空頭趨勢"], default="🟢 安全區間")
-    df['Hover_Text'] = "20MA乖離: " + df['Bias_20MA'].round(2).astype(str) + "%<br>RSI: " + df['RSI'].round(1).astype(str) + "<br>判定: <b>" + df['Status_Signal'] + "</b>"
+    
+    # ★ 將 OHLC 與成交量加入 Hover Text，讓歷史 K 棒也能看到細節
+    df['Hover_Text'] = (
+        "開: " + df['Open'].round(2).astype(str) + " 高: " + df['High'].round(2).astype(str) + "<br>" +
+        "低: " + df['Low'].round(2).astype(str) + " 收: " + df['Close'].round(2).astype(str) + "<br>" +
+        "量: " + (df['Volume'] / 1000).astype(int).astype(str) + "K<br>" +
+        "20MA乖離: " + df['Bias_20MA'].round(2).astype(str) + "%<br>" +
+        "RSI: " + df['RSI'].round(1).astype(str) + "<br>" +
+        "判定: <b>" + df['Status_Signal'] + "</b>"
+    )
     
     df['TR'] = np.maximum(df['High'] - df['Low'], np.maximum(abs(df['High'] - df['Close'].shift(1)), abs(df['Low'] - df['Close'].shift(1))))
     df['+DM'] = np.where((df['High'] - df['High'].shift(1)) > (df['Low'].shift(1) - df['Low']), np.maximum(df['High'] - df['High'].shift(1), 0), 0)
@@ -376,7 +385,6 @@ with tab1:
                         st.rerun()
 
         st.markdown(f"### 🛡️ 今日戰情室：進場風險評估 (日期: {latest.name.strftime('%Y-%m-%d')})")
-        # ★ 計算今日價差
         diff = latest['Close'] - prev['Close']
         diff_pct = (diff / prev['Close']) * 100
         sign = "+" if diff > 0 else ""
@@ -389,29 +397,20 @@ with tab1:
         st.markdown("---")
         
         # ==========================================
-        # ★ 完美繪圖區：極簡浮動視窗 + 專業十字線 + 上方報價 + 左上方 MA
+        # ★ 完美修復：自動吸附的十字線與極簡資訊框
         # ==========================================
-        # 1. 將第一張圖表的標題改成 OHLC 報價
         ohlc_title = f"開={latest['Open']:.2f} 高={latest['High']:.2f} 低={latest['Low']:.2f} 收={latest['Close']:.2f}  {sign}{diff:.2f} ({sign}{diff_pct:.2f}%)"
+        fig = make_subplots(rows=6, cols=1, shared_xaxes=True, vertical_spacing=0.04, row_heights=[0.4, 0.12, 0.12, 0.12, 0.12, 0.12], subplot_titles=(ohlc_title, "成交量", "KD", "MACD", "RSI", "OBV"))
         
-        fig = make_subplots(rows=6, cols=1, shared_xaxes=True, vertical_spacing=0.04, row_heights=[0.4, 0.12, 0.12, 0.12, 0.12, 0.12], 
-                            subplot_titles=(ohlc_title, "成交量", "KD", "MACD", "RSI", "OBV"))
+        fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name='K線', showlegend=False, customdata=df['Hover_Text'], hovertemplate="%{customdata}<extra></extra>"), row=1, col=1)
         
-        # 2. K 線 (保留 Hover，取消 showlegend)
-        fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name='K線', showlegend=False, customdata=df['Hover_Text'], hovertemplate="<b>日期:</b> %{x|%Y-%m-%d}<br><b>收:</b> %{close:.2f}<br><br>%{customdata}<extra></extra>"), row=1, col=1)
-        
-        # 3. 均線與通道線 (加入 name=數值, showlegend=True 以實作左上方資訊板)
         fig.add_trace(go.Scatter(x=df.index, y=df['Upper_Band'], line=dict(color='rgba(150,150,150,0.5)', width=1, dash='dash'), hoverinfo='skip', showlegend=False), row=1, col=1)
-        
-        # ★ 將 MA 顯示在 Legend 區塊
         fig.add_trace(go.Scatter(x=df.index, y=df['SMA_5'], line=dict(color='magenta', width=1.5), name=f"MA 5  {latest['SMA_5']:.2f}", hoverinfo='skip', showlegend=True), row=1, col=1) 
         fig.add_trace(go.Scatter(x=df.index, y=df['SMA_10'], line=dict(color='deepskyblue', width=1.5), name=f"MA 10  {latest['SMA_10']:.2f}", hoverinfo='skip', showlegend=True), row=1, col=1) 
         fig.add_trace(go.Scatter(x=df.index, y=df['SMA_20'], line=dict(color='blue', width=1.5), name=f"MA 20  {latest['SMA_20']:.2f}", hoverinfo='skip', showlegend=True), row=1, col=1)
         fig.add_trace(go.Scatter(x=df.index, y=df['SMA_60'], line=dict(color='green', width=2), name=f"MA 60  {latest['SMA_60']:.2f}", hoverinfo='skip', showlegend=True), row=1, col=1)
-        
         fig.add_trace(go.Scatter(x=df.index, y=df['Lower_Band'], line=dict(color='rgba(150,150,150,0.5)', width=1, dash='dash'), hoverinfo='skip', showlegend=False), row=1, col=1)
 
-        # 買賣點標籤 (加入 showlegend=False)
         if use_breakout: fig.add_trace(go.Scatter(x=df[df['Buy_Breakout']].index, y=df.loc[df['Buy_Breakout'], 'Low'] - df.loc[df['Buy_Breakout'], 'ATR_14']*0.4, mode='markers', marker=dict(symbol='triangle-up', size=14, color='magenta', line=dict(width=1, color='black')), hoverinfo='skip', showlegend=False), row=1, col=1)
         if use_pullback: fig.add_trace(go.Scatter(x=df[df['Buy_Pullback']].index, y=df.loc[df['Buy_Pullback'], 'Low'] - df.loc[df['Buy_Pullback'], 'ATR_14']*0.8, mode='markers', marker=dict(symbol='triangle-up', size=13, color='lime', line=dict(width=1, color='black')), hoverinfo='skip', showlegend=False), row=1, col=1)
         if use_ma_bounce: fig.add_trace(go.Scatter(x=df[df['Buy_MABounce']].index, y=df.loc[df['Buy_MABounce'], 'Low'] - df.loc[df['Buy_MABounce'], 'ATR_14']*1.2, mode='markers', marker=dict(symbol='triangle-up', size=13, color='dodgerblue', line=dict(width=1, color='black')), hoverinfo='skip', showlegend=False), row=1, col=1)
@@ -446,7 +445,6 @@ with tab1:
                     fig.add_shape(type="rect", x0=ed, y0=ep, x1=df.index[i], y1=xp, fillcolor=fc, line=dict(color=lc, width=2), row=1, col=1)
                     fig.add_annotation(x=df.index[i], y=df['High'].iloc[i] + df['ATR_14'].iloc[i]*2.8, text=f"<b>{xp-ep:.2f} ({ret:.1f}%)</b>", showarrow=True, arrowhead=1, arrowcolor=lc, ax=0, ay=-30, font=dict(color="white", size=11), bgcolor=bg, row=1, col=1)
 
-        # 副圖也加入 showlegend=False 確保圖例只有均線
         vol_colors = ['red' if c >= o else 'green' for c, o in zip(df['Close'], df['Open'])]
         fig.add_trace(go.Bar(x=df.index, y=df['Volume'], marker_color=vol_colors, hoverinfo='skip', showlegend=False), row=2, col=1)
         fig.add_trace(go.Scatter(x=df.index, y=df['Vol_5MA'], line=dict(color='orange', dash='dot'), hoverinfo='skip', showlegend=False), row=2, col=1)
@@ -458,16 +456,17 @@ with tab1:
         fig.add_trace(go.Scatter(x=df.index, y=df['RSI'], line=dict(color='darkred'), hoverinfo='skip', showlegend=False), row=5, col=1)
         fig.add_trace(go.Scatter(x=df.index, y=df['OBV'], line=dict(color='teal'), hoverinfo='skip', showlegend=False), row=6, col=1)
         
-        # ★ 將圖例放在左上角，並加入十字輔助線
+        # ★ 十字線吸附修正 (spikesnap='data')
         dt_breaks = [d.strftime("%Y-%m-%d") for d in pd.date_range(start=df.index[0], end=df.index[-1]) if d not in df.index]
         fig.update_xaxes(
-            showspikes=True, spikemode='across', spikesnap='cursor', spikethickness=1, spikedash='dot', spikecolor='gray',
+            showspikes=True, spikemode='across', spikesnap='data', spikethickness=1, spikedash='dot', spikecolor='gray',
             range=[df.index[-1] - pd.Timedelta(days=150), df.index[-1] + pd.Timedelta(days=10)], rangebreaks=[dict(values=dt_breaks)]
         )
-        fig.update_yaxes(showspikes=True, spikemode='across', spikesnap='cursor', spikethickness=1, spikedash='dot', spikecolor='gray')
+        fig.update_yaxes(showspikes=True, spikemode='across', spikesnap='data', spikethickness=1, spikedash='dot', spikecolor='gray')
         
+        # ★ 移除了會導致失效的 hoverdistance=0
         fig.update_layout(
-            height=1300, hovermode="x unified", hoverdistance=0, dragmode='pan', xaxis_rangeslider_visible=False,
+            height=1300, hovermode="x unified", dragmode='pan', xaxis_rangeslider_visible=False,
             legend=dict(orientation="v", yanchor="top", y=1.0, xanchor="left", x=0.005, bgcolor="rgba(255,255,255,0.7)", font=dict(size=12))
         )
         st.plotly_chart(fig, use_container_width=True, config={'scrollZoom': True})
