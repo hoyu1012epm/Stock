@@ -81,7 +81,7 @@ if not st.session_state["logged_in"]:
     st.stop() 
 
 # ==========================================
-# 📊 核心運算函數 (導入三大氣候區間引擎)
+# 📊 核心運算函數
 # ==========================================
 @st.cache_data(ttl=86400)
 def get_stock_name(ticker):
@@ -94,6 +94,15 @@ def load_data(ticker, days=1825):
     if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
     if not df.empty: df.index = pd.to_datetime(df.index).tz_localize(None)
     return df
+
+def apply_cooldown(signal_series, cooldown_period):
+    clean_signal = pd.Series(False, index=signal_series.index)
+    last_signal_idx = -cooldown_period - 1
+    for i, val in enumerate(signal_series):
+        if val and (i - last_signal_idx) > cooldown_period:
+            clean_signal.iloc[i] = True
+            last_signal_idx = i
+    return clean_signal
 
 def calculate_indicators(df, bbw_f, vol_f, kd_thresh, use_adx, cooldown, bias_limit):
     if len(df) < 60: return df 
@@ -122,21 +131,12 @@ def calculate_indicators(df, bbw_f, vol_f, kd_thresh, use_adx, cooldown, bias_li
     df['OBV'] = (np.sign(df['Close'].diff()) * df['Volume']).fillna(0).cumsum()
     df['Bias_20MA'] = (df['Close'] - df['SMA_20']) / df['SMA_20'] * 100
     
-    # ==========================================
-    # ★ 全新：三大氣候區間 (Zone) 判定引擎
-    # ==========================================
-    # 條件 1: 升溫過熱區 (Warming Zone) -> 準備收割
+    # ★ 三大氣候區間 (Zone) 判定引擎
     cond_warm = (df['RSI'] >= 70) | (df['High'] >= df['Upper_Band'])
-    # 條件 2: 價值區間 (Value Zone) -> 分批慢慢買 (RSI冷卻，且價格靠近或略低於季線/月線)
     cond_value = (df['RSI'] <= 45) & (df['Close'] <= df['SMA_20'] * 1.05) & (df['Close'] >= df['SMA_60'] * 0.85)
+    df['Zone_Status'] = np.select([cond_warm, cond_value], ["🔴 升溫區間", "🟢 價值區間"], default="⚪ 空蕩等待")
     
-    # 定義區間狀態
-    df['Zone_Status'] = np.select(
-        [cond_warm, cond_value], 
-        ["🔴 升溫區間 (逢高分批賣出)", "🟢 價值區間 (逢低分批建倉)"], 
-        default="⚪ 空蕩等待 (抱緊持股 / 觀望)"
-    )
-    
+    # 懸浮資訊與隱形天花板
     df['Hover_Text'] = (
         "開: " + df['Open'].round(2).astype(str) + " 高: " + df['High'].round(2).astype(str) + "<br>" +
         "低: " + df['Low'].round(2).astype(str) + " 收: " + df['Close'].round(2).astype(str) + "<br>" +
@@ -145,20 +145,33 @@ def calculate_indicators(df, bbw_f, vol_f, kd_thresh, use_adx, cooldown, bias_li
         "RSI: " + df['RSI'].round(1).astype(str) + "<br>" +
         "目前水位: <b>" + df['Zone_Status'] + "</b>"
     )
-    
     df['Hover_Y'] = df['High'].rolling(30, center=True, min_periods=1).max() + (df['High'] - df['Low']).ewm(alpha=1/14, adjust=False).mean() * 2.5
     
-    # 保留原本的輔助買賣點 (作為更細緻的參考)
     df['TR'] = np.maximum(df['High'] - df['Low'], np.maximum(abs(df['High'] - df['Close'].shift(1)), abs(df['Low'] - df['Close'].shift(1))))
+    df['+DM'] = np.where((df['High'] - df['High'].shift(1)) > (df['Low'].shift(1) - df['Low']), np.maximum(df['High'] - df['High'].shift(1), 0), 0)
+    df['-DM'] = np.where((df['Low'].shift(1) - df['Low']) > (df['High'] - df['High'].shift(1)), np.maximum(df['Low'].shift(1) - df['Low'], 0), 0)
     df['ATR_14'] = df['TR'].ewm(alpha=1/14, adjust=False).mean()
+    df['+DI'] = 100 * (df['+DM'].ewm(alpha=1/14, adjust=False).mean() / df['ATR_14'])
+    df['-DI'] = 100 * (df['-DM'].ewm(alpha=1/14, adjust=False).mean() / df['ATR_14'])
+    df['DX'] = 100 * abs(df['+DI'] - df['-DI']) / (df['+DI'] + df['-DI'])
+    df['ADX'] = df['DX'].ewm(alpha=1/14, adjust=False).mean()
+    
+    adx_cond = (df['ADX'] > 20) if use_adx else True
     df['Vol_5MA'] = df['Volume'].rolling(5).mean()
-    df['Is_Squeeze'] = df['BBW'] <= df['BBW'].rolling(20).min() * bbw_f
     
-    df['Buy_Breakout'] = (df['Is_Squeeze'].rolling(5).max().fillna(0).astype(bool)) & (df['Close'] > df['Upper_Band']) & (df['Volume'] > df['Vol_5MA'] * vol_f)
-    df['Buy_MABounce'] = (df['SMA_5'] > df['SMA_20']) & (df['Low'] <= (df['SMA_20'] * 1.015)) & (df['Close'] > df['SMA_20'])
-    df['Sell_BB'] = (df['High'] >= df['Upper_Band']) & (df['Close'] < df['Open'])
-    df['Sell_10MA'] = (df['Close'] < df['SMA_10']) & (df['Close'].shift(1) >= df['SMA_10'].shift(1))
-    
+    # 買賣點運算
+    df['Buy_Breakout'] = apply_cooldown((df['BBW'] <= df['BBW'].rolling(20).min() * bbw_f).rolling(5).max().fillna(0).astype(bool) & (df['Close'] > df['Upper_Band']) & (df['Volume'] > df['Vol_5MA'] * vol_f) & (df['Close'] > df['SMA_60']) & adx_cond, cooldown)
+    df['Buy_Pullback'] = apply_cooldown((df['K'] > df['D']) & (df['K'].shift(1) <= df['D'].shift(1)) & (df['K'] <= kd_thresh) & (df['Close'] > df['SMA_60']) & adx_cond, cooldown)
+    df['Buy_MABounce'] = apply_cooldown((df['SMA_5'] > df['SMA_20']) & (df['SMA_20'] > df['SMA_60']) & (df['Low'] <= (df['SMA_20'] * 1.015)) & (df['Close'] > df['SMA_20']) & (df['Close'] > df['Open']) & adx_cond, cooldown)
+    df['Buy_5MABounce'] = apply_cooldown((df['SMA_5'] > df['SMA_20']) & (df['Close'] > df['SMA_20']) & (df['Low'] <= (df['SMA_5'] * 1.015)) & (df['Close'] > df['SMA_5']) & (df['Close'] > df['Open']) & adx_cond, cooldown)
+
+    df['Sell_BB'] = apply_cooldown((df['High'] >= df['Upper_Band']) & (df['Close'] < df['Open']), cooldown)
+    df['Sell_5MA'] = apply_cooldown((df['Close'] < df['SMA_5']) & (df['Close'].shift(1) >= df['SMA_5'].shift(1)), cooldown)
+    df['Sell_10MA'] = apply_cooldown((df['Close'] < df['SMA_10']) & (df['Close'].shift(1) >= df['SMA_10'].shift(1)), cooldown)
+    df['Sell_KD'] = apply_cooldown((df['K'] < df['D']) & (df['K'].shift(1) >= df['D'].shift(1)) & (df['K'].shift(1) >= 70), cooldown)
+    df['Sell_RSI'] = apply_cooldown((df['RSI'] < 70) & (df['RSI'].shift(1) >= 70), cooldown)
+    df['Sell_MACD'] = apply_cooldown((df['MACD'] < df['Signal']) & (df['MACD'].shift(1) >= df['Signal'].shift(1)), cooldown)
+    df['Sell_MA20'] = apply_cooldown((df['Close'] < df['SMA_20']) & (df['Close'].shift(1) >= df['SMA_20'].shift(1)), cooldown)
     return df
 
 def draw_gauge(val, max_val, title, color):
@@ -184,7 +197,6 @@ def sync_global_data():
             bias_60 = ((tw_last['Close'] - tw_last['SMA_60']) / tw_last['SMA_60']) * 100
             bias_20 = ((tw_last['Close'] - tw_last['SMA_20']) / tw_last['SMA_20']) * 100
 
-            # 統一使用「區間建倉」的平緩評分模型
             s_trend = float(np.clip(40 * (bias_60 + 5) / 10, 0, 40)); s_mom = float(np.clip(20 * (bias_20 + 3) / 6, 0, 20))
             s_bias = float(np.clip(20 - (20 * (bias_20 + 5) / 10), 0, 20)); s_vix = float(np.clip(20 - (20 * (vix_last - 15) / 20), 0, 20))
             titles = ["大盤長線趨勢 (40%)", "大盤短線動能 (20%)", "市場乖離冷卻度 (20%)", "VIX 安定度 (20%)"]
@@ -231,9 +243,32 @@ st.sidebar.markdown("---")
 sidebar_trade_container = st.sidebar.container()
 st.sidebar.markdown("---")
 
-st.sidebar.title("⚙️ 圖表視覺控制台")
-show_zone_bg = st.sidebar.checkbox("開啟【三大氣候區間背景色】", value=True, help="綠色代表價值區間(買)，紅色代表升溫區間(賣)，無色為空蕩等待區。")
+st.sidebar.title("⚙️ 圖表與策略控制台")
+show_zone_bg = st.sidebar.checkbox("開啟【三大氣候區間背景色】", value=True)
 show_trade_lines = st.sidebar.checkbox("開啟【歷史持倉獲利方塊】", value=True)
+use_adx_filter = st.sidebar.checkbox("開啟【ADX 趨勢過濾】", value=True)
+cooldown_days = st.sidebar.slider("訊號冷卻天數", 1, 10, 5)
+safe_bias_limit = st.sidebar.slider("安全乖離率上限 (%)", 1.0, 15.0, 5.0)
+
+st.sidebar.markdown("---")
+st.sidebar.subheader("🎯 買點設定 (向上箭頭 ▲)")
+use_breakout = st.sidebar.checkbox("開啟【壓縮突破】(桃紅 ▲)", value=True)
+bbw_factor = st.sidebar.slider("└ 布林壓縮容錯", 1.0, 1.5, 1.1)
+vol_factor = st.sidebar.slider("└ 成交量爆發倍數", 1.0, 3.0, 1.5)
+use_pullback = st.sidebar.checkbox("開啟【多頭拉回】(綠色 ▲)", value=False)
+kd_threshold = st.sidebar.slider("└ KD 金叉最高位階", 20, 80, 50)
+use_ma_bounce = st.sidebar.checkbox("開啟【20MA 回踩】(淺藍 ▲)", value=True)
+use_5ma_bounce = st.sidebar.checkbox("開啟【5MA 回踩】(黃色 ▲)", value=False)
+
+st.sidebar.markdown("---")
+st.sidebar.subheader("🛑 賣點設定 (向下箭頭 ▼)")
+use_sell_bb = st.sidebar.checkbox("開啟【觸碰上軌】達標停利 (粉紅 ▼)", value=True) 
+use_sell_5ma = st.sidebar.checkbox("開啟【跌破 5MA】極短線停利 (紅色 ▼)", value=False)
+use_sell_10ma = st.sidebar.checkbox("開啟【跌破 10MA】波段防守 (青色 ▼)", value=True) 
+use_sell_kd = st.sidebar.checkbox("開啟【KD 死叉】敏銳停利 (橘色 ▼)", value=False)
+use_sell_rsi = st.sidebar.checkbox("開啟【RSI 跌破 70】過熱出場 (紫色 ▼)", value=False)
+use_sell_macd = st.sidebar.checkbox("開啟【MACD 死叉】長線轉弱 (深藍 ▼)", value=False) 
+use_sell_ma = st.sidebar.checkbox("開啟【跌破 20MA】長線停損 (黑色 ▼)", value=False) 
 
 # ==========================================
 # 🗂️ 建立分頁
@@ -258,7 +293,7 @@ with tab1:
     if not df_raw.empty:
         stock_name = get_stock_name(ticker_input)
         st.markdown(f"## 📊 {stock_name} ({ticker_input})")
-        df = calculate_indicators(df_raw.copy(), 1.1, 1.5, 50, True, 5, 5.0)
+        df = calculate_indicators(df_raw.copy(), bbw_factor, vol_factor, kd_threshold, use_adx_filter, cooldown_days, safe_bias_limit)
         latest, prev = df.iloc[-1], df.iloc[-2]
         
         st.markdown("### 🧮 區間存股資金配速器")
@@ -305,7 +340,7 @@ with tab1:
                 shares_by_budget = int(per_stock_budget // entry_price)
 
                 risk_amount = total_equity * (risk_pct / 100.0)
-                assumed_risk = entry_price * 0.10 # 長線波段抓 10% 停損空間
+                assumed_risk = entry_price * 0.10 
                 shares_by_risk = int(risk_amount // assumed_risk)
                 max_shares = min(shares_by_budget, shares_by_risk)
                 
@@ -347,20 +382,17 @@ with tab1:
         st.markdown("---")
         
         # ==========================================
-        # ★ 完美繪圖區：加入背景氣候區間色塊
+        # ★ 繪圖區塊
         # ==========================================
         ohlc_title = f"開={latest['Open']:.2f} 高={latest['High']:.2f} 低={latest['Low']:.2f} 收={latest['Close']:.2f}  {sign}{diff:.2f} ({sign}{diff_pct:.2f}%)"
         fig = make_subplots(rows=6, cols=1, shared_xaxes=True, vertical_spacing=0.04, row_heights=[0.4, 0.12, 0.12, 0.12, 0.12, 0.12], subplot_titles=(ohlc_title, "成交量", "KD", "MACD", "RSI", "OBV"))
         
-        # ★ 畫出氣候區間的背景色塊
         if show_zone_bg:
-            # 尋找連續的區間並畫上背景
             df['Zone_Num'] = np.where(df['Zone_Status'].str.contains("升溫"), 1, np.where(df['Zone_Status'].str.contains("價值"), -1, 0))
-            # 簡單的迴圈畫出背景色
             for i in range(len(df)):
-                if df['Zone_Num'].iloc[i] == 1: # 升溫(賣)
+                if df['Zone_Num'].iloc[i] == 1: 
                     fig.add_shape(type="rect", x0=df.index[i]-pd.Timedelta(hours=12), x1=df.index[i]+pd.Timedelta(hours=12), y0=0, y1=1, xref="x", yref="paper", fillcolor="rgba(255, 0, 0, 0.08)", line_width=0, layer="below")
-                elif df['Zone_Num'].iloc[i] == -1: # 價值(買)
+                elif df['Zone_Num'].iloc[i] == -1: 
                     fig.add_shape(type="rect", x0=df.index[i]-pd.Timedelta(hours=12), x1=df.index[i]+pd.Timedelta(hours=12), y0=0, y1=1, xref="x", yref="paper", fillcolor="rgba(0, 255, 0, 0.08)", line_width=0, layer="below")
 
         fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name='K線', increasing_line_color='red', decreasing_line_color='green', showlegend=False, hoverinfo='skip'), row=1, col=1)
@@ -373,13 +405,34 @@ with tab1:
         fig.add_trace(go.Scatter(x=df.index, y=df['SMA_60'], line=dict(color='green', width=2), name=f"MA 60  {latest['SMA_60']:.2f}", hoverinfo='skip', showlegend=True), row=1, col=1)
         fig.add_trace(go.Scatter(x=df.index, y=df['Lower_Band'], line=dict(color='rgba(150,150,150,0.5)', width=1, dash='dash'), hoverinfo='skip', showlegend=False), row=1, col=1)
 
-        # 輔助參考小指標
-        fig.add_trace(go.Scatter(x=df[df['Buy_Breakout']].index, y=df.loc[df['Buy_Breakout'], 'Low'] - df.loc[df['Buy_Breakout'], 'ATR_14']*0.4, mode='markers', marker=dict(symbol='triangle-up', size=8, color='cyan', line=dict(width=1, color='black')), hoverinfo='skip', showlegend=False), row=1, col=1)
-        fig.add_trace(go.Scatter(x=df[df['Sell_BB']].index, y=df.loc[df['Sell_BB'], 'High'] + df.loc[df['Sell_BB'], 'ATR_14']*0.4, mode='markers', marker=dict(symbol='triangle-down', size=8, color='hotpink', line=dict(width=1, color='black')), hoverinfo='skip', showlegend=False), row=1, col=1)
+        if use_breakout: fig.add_trace(go.Scatter(x=df[df['Buy_Breakout']].index, y=df.loc[df['Buy_Breakout'], 'Low'] - df.loc[df['Buy_Breakout'], 'ATR_14']*0.4, mode='markers', marker=dict(symbol='triangle-up', size=14, color='magenta', line=dict(width=1, color='black')), hoverinfo='skip', showlegend=False), row=1, col=1)
+        if use_pullback: fig.add_trace(go.Scatter(x=df[df['Buy_Pullback']].index, y=df.loc[df['Buy_Pullback'], 'Low'] - df.loc[df['Buy_Pullback'], 'ATR_14']*0.8, mode='markers', marker=dict(symbol='triangle-up', size=13, color='lime', line=dict(width=1, color='black')), hoverinfo='skip', showlegend=False), row=1, col=1)
+        if use_ma_bounce: fig.add_trace(go.Scatter(x=df[df['Buy_MABounce']].index, y=df.loc[df['Buy_MABounce'], 'Low'] - df.loc[df['Buy_MABounce'], 'ATR_14']*1.2, mode='markers', marker=dict(symbol='triangle-up', size=13, color='dodgerblue', line=dict(width=1, color='black')), hoverinfo='skip', showlegend=False), row=1, col=1)
+        if use_5ma_bounce: fig.add_trace(go.Scatter(x=df[df['Buy_5MABounce']].index, y=df.loc[df['Buy_5MABounce'], 'Low'] - df.loc[df['Buy_5MABounce'], 'ATR_14']*1.6, mode='markers', marker=dict(symbol='triangle-up', size=12, color='gold', line=dict(width=1, color='black')), hoverinfo='skip', showlegend=False), row=1, col=1)
+        if use_sell_bb: fig.add_trace(go.Scatter(x=df[df['Sell_BB']].index, y=df.loc[df['Sell_BB'], 'High'] + df.loc[df['Sell_BB'], 'ATR_14']*0.4, mode='markers', marker=dict(symbol='triangle-down', size=12, color='hotpink', line=dict(width=1, color='black')), hoverinfo='skip', showlegend=False), row=1, col=1)
+        if use_sell_5ma: fig.add_trace(go.Scatter(x=df[df['Sell_5MA']].index, y=df.loc[df['Sell_5MA'], 'High'] + df.loc[df['Sell_5MA'], 'ATR_14']*0.8, mode='markers', marker=dict(symbol='triangle-down', size=12, color='red', line=dict(width=1, color='black')), hoverinfo='skip', showlegend=False), row=1, col=1)
+        if use_sell_10ma: fig.add_trace(go.Scatter(x=df[df['Sell_10MA']].index, y=df.loc[df['Sell_10MA'], 'High'] + df.loc[df['Sell_10MA'], 'ATR_14']*1.2, mode='markers', marker=dict(symbol='triangle-down', size=12, color='cyan', line=dict(width=1, color='black')), hoverinfo='skip', showlegend=False), row=1, col=1)
+        if use_sell_kd: fig.add_trace(go.Scatter(x=df[df['Sell_KD']].index, y=df.loc[df['Sell_KD'], 'High'] + df.loc[df['Sell_KD'], 'ATR_14']*1.6, mode='markers', marker=dict(symbol='triangle-down', size=12, color='orange', line=dict(width=1, color='black')), hoverinfo='skip', showlegend=False), row=1, col=1)
+        if use_sell_rsi: fig.add_trace(go.Scatter(x=df[df['Sell_RSI']].index, y=df.loc[df['Sell_RSI'], 'High'] + df.loc[df['Sell_RSI'], 'ATR_14']*2.0, mode='markers', marker=dict(symbol='triangle-down', size=12, color='purple', line=dict(width=1, color='black')), hoverinfo='skip', showlegend=False), row=1, col=1)
+        if use_sell_macd: fig.add_trace(go.Scatter(x=df[df['Sell_MACD']].index, y=df.loc[df['Sell_MACD'], 'High'] + df.loc[df['Sell_MACD'], 'ATR_14']*2.4, mode='markers', marker=dict(symbol='triangle-down', size=12, color='blue', line=dict(width=1, color='black')), hoverinfo='skip', showlegend=False), row=1, col=1)
+        if use_sell_ma: fig.add_trace(go.Scatter(x=df[df['Sell_MA20']].index, y=df.loc[df['Sell_MA20'], 'High'] + df.loc[df['Sell_MA20'], 'ATR_14']*2.8, mode='markers', marker=dict(symbol='triangle-down', size=13, color='black', line=dict(width=1, color='black')), hoverinfo='skip', showlegend=False), row=1, col=1)
 
         if show_trade_lines:
-            df['CBuy'] = df['Buy_MABounce']
-            df['CSell'] = df['Sell_10MA']
+            df['CBuy'] = False
+            if use_breakout: df['CBuy'] |= df['Buy_Breakout']
+            if use_pullback: df['CBuy'] |= df['Buy_Pullback']
+            if use_ma_bounce: df['CBuy'] |= df['Buy_MABounce']
+            if use_5ma_bounce: df['CBuy'] |= df['Buy_5MABounce']
+            
+            df['CSell'] = False
+            if use_sell_bb: df['CSell'] |= df['Sell_BB']
+            if use_sell_5ma: df['CSell'] |= df['Sell_5MA']
+            if use_sell_10ma: df['CSell'] |= df['Sell_10MA']
+            if use_sell_kd: df['CSell'] |= df['Sell_KD']
+            if use_sell_rsi: df['CSell'] |= df['Sell_RSI']
+            if use_sell_macd: df['CSell'] |= df['Sell_MACD']
+            if use_sell_ma: df['CSell'] |= df['Sell_MA20']
+
             pos, ep, ed = 0, 0, None
             for i in range(len(df)):
                 if pos == 0 and df['CBuy'].iloc[i]: pos, ep, ed = 1, df['Close'].iloc[i], df.index[i]
@@ -409,8 +462,58 @@ with tab1:
     else:
         st.warning("⚠️ 找不到該股票代碼，請確認代碼是否正確。")
 
-with tab2: st.info("🚀 掃描器可依據新區間邏輯擴充...")
-with tab3: st.info("💰 回測實驗室運作中...")
+# ------------------------------------------
+# 分頁二：🚀 策略選股掃描器 (★ 完美修復)
+# ------------------------------------------
+with tab2:
+    st.header("🚀 策略選股掃描器")
+    st.markdown("系統將依照您左側邊欄勾選的 **【買點設定】**，自動從各大主題題材庫中，篩選出今天剛好觸發買訊的股票！")
+    market_pools = {
+        "🔥 台股前 50 大權值股": "2330.TW, 2317.TW, 2454.TW, 2382.TW, 2308.TW, 2881.TW, 2891.TW, 2412.TW, 2882.TW, 2886.TW, 1216.TW, 2002.TW, 2884.TW, 2892.TW, 2603.TW, 2303.TW, 2885.TW, 3231.TW, 1101.TW, 2890.TW, 2207.TW, 5871.TW, 2880.TW, 2357.TW, 2395.TW, 2883.TW, 3711.TW, 2887.TW, 2301.TW, 4938.TW",
+        "🤖 半導體與 AI 概念股 (上市櫃混合)": "2330.TW, 2454.TW, 2303.TW, 2379.TW, 3231.TW, 2382.TW, 3443.TW, 3661.TW, 3034.TW, 6669.TW, 3293.TWO, 8069.TWO, 6488.TW, 2356.TW, 3017.TW, 2376.TW, 3529.TW, 2449.TW",
+        "💰 熱門高股息與大盤 ETF": "0050.TW, 0056.TW, 00878.TW, 00919.TW, 00929.TW, 00713.TW, 006208.TW, 00939.TW, 00940.TW, 00733.TW",
+        "🇺🇸 美股科技巨頭": "AAPL, MSFT, GOOGL, AMZN, META, TSLA, NVDA, AMD, TSM, AVGO, INTC",
+        "✍️ 自訂輸入清單": ""
+    }
+    selected_pool = st.selectbox("📁 選擇要掃描的股池：", list(market_pools.keys()))
+    if selected_pool == "✍️ 自訂輸入清單": scan_tickers_input = st.text_area("📝 請輸入股票代碼 (以半形逗號分隔)", value="2330.TW, 0050.TW")
+    else: scan_tickers_input = st.text_area("📝 股池內容 (可手動增刪微調)", value=market_pools[selected_pool])
+    
+    if st.button("⚡ 開始智慧防擋掃描", type="primary"):
+        ticker_list = [t.strip().upper() for t in scan_tickers_input.split(",") if t.strip()]
+        scan_results = []
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        for i, ticker in enumerate(ticker_list):
+            status_text.text(f"🔍 掃描中: {ticker} ({i+1}/{len(ticker_list)})...")
+            try:
+                df_scan = load_data(ticker, days=150) 
+                if not df_scan.empty:
+                    df_scan = calculate_indicators(df_scan, bbw_factor, vol_factor, kd_threshold, use_adx_filter, cooldown_days, safe_bias_limit)
+                    latest_day = df_scan.iloc[-1]
+                    buy_reasons = []
+                    if use_breakout and latest_day.get('Buy_Breakout', False): buy_reasons.append("突破")
+                    if use_pullback and latest_day.get('Buy_Pullback', False): buy_reasons.append("拉回")
+                    if use_ma_bounce and latest_day.get('Buy_MABounce', False): buy_reasons.append("回踩20MA")
+                    if use_5ma_bounce and latest_day.get('Buy_5MABounce', False): buy_reasons.append("回踩5MA")
+                    
+                    if buy_reasons:
+                        scan_results.append({"股票代碼": ticker, "最新收盤價": round(latest_day['Close'], 2), "今日觸發": " + ".join(buy_reasons), "水位判定": latest_day['Zone_Status']})
+            except Exception as e: pass
+            time.sleep(0.15) 
+            progress_bar.progress((i + 1) / len(ticker_list))
+            
+        status_text.text("✅ 掃描完成！")
+        if scan_results:
+            st.success(f"🎉 掃描出 {len(scan_results)} 檔符合策略標的。")
+            st.dataframe(pd.DataFrame(scan_results), use_container_width=True)
+        else: st.warning("🥲 查無符合條件之標的。")
+
+# ------------------------------------------
+# 分頁三：💰 策略回測實驗室 (準備區)
+# ------------------------------------------
+with tab3: st.info("💰 回測實驗室架構建置中，敬請期待下一階段升級...")
 
 # ------------------------------------------
 # 分頁四：⚖️ 雲端金庫與大盤儀表板 
