@@ -144,7 +144,6 @@ def calculate_indicators(df, bbw_f, vol_f, kd_thresh, use_adx, cooldown, bias_li
         "目前水位: <b>" + df['Zone_Status'] + "</b>"
     )
     
-    # 隱形天花板 (避開K線)
     df['Hover_Y'] = df['High'].rolling(30, center=True, min_periods=1).max() + (df['High'] - df['Low']).ewm(alpha=1/14, adjust=False).mean() * 2.5
     
     df['TR'] = np.maximum(df['High'] - df['Low'], np.maximum(abs(df['High'] - df['Close'].shift(1)), abs(df['Low'] - df['Close'].shift(1))))
@@ -159,14 +158,12 @@ def calculate_indicators(df, bbw_f, vol_f, kd_thresh, use_adx, cooldown, bias_li
     adx_cond = (df['ADX'] > 20) if use_adx else True
     df['Vol_5MA'] = df['Volume'].rolling(5).mean()
     
-    # 買點設定 (加上左側下軌買點)
     df['Buy_LowerBand_Raw'] = (df['Low'] <= df['Lower_Band']) & (df['Close'] > df['Open']) 
     df['Breakout_Raw'] = (df['BBW'] <= df['BBW'].rolling(20).min() * bbw_f).rolling(5).max().fillna(0).astype(bool) & (df['Close'] > df['Upper_Band']) & (df['Volume'] > df['Vol_5MA'] * vol_f) & (df['Close'] > df['SMA_60']) & adx_cond
     df['Pullback_Raw'] = (df['K'] > df['D']) & (df['K'].shift(1) <= df['D'].shift(1)) & (df['K'] <= kd_thresh) & (df['Close'] > df['SMA_60']) & adx_cond
     df['MABounce_Raw'] = (df['SMA_5'] > df['SMA_20']) & (df['SMA_20'] > df['SMA_60']) & (df['Low'] <= (df['SMA_20'] * 1.015)) & (df['Close'] > df['SMA_20']) & (df['Close'] > df['Open']) & adx_cond
     df['5MABounce_Raw'] = (df['SMA_5'] > df['SMA_20']) & (df['Close'] > df['SMA_20']) & (df['Low'] <= (df['SMA_5'] * 1.015)) & (df['Close'] > df['SMA_5']) & (df['Close'] > df['Open']) & adx_cond
 
-    # 賣點設定
     df['Sell_BB_Raw'] = (df['High'] >= df['Upper_Band']) & (df['Close'] < df['Open'])
     df['Sell_5MA_Raw'] = (df['Close'] < df['SMA_5']) & (df['Close'].shift(1) >= df['SMA_5'].shift(1))
     df['Sell_10MA_Raw'] = (df['Close'] < df['SMA_10']) & (df['Close'].shift(1) >= df['SMA_10'].shift(1))
@@ -175,7 +172,6 @@ def calculate_indicators(df, bbw_f, vol_f, kd_thresh, use_adx, cooldown, bias_li
     df['Sell_MACD_Raw'] = (df['MACD'] < df['Signal']) & (df['MACD'].shift(1) >= df['Signal'].shift(1))
     df['Sell_MA20_Raw'] = (df['Close'] < df['SMA_20']) & (df['Close'].shift(1) >= df['SMA_20'].shift(1))
 
-    # 冷卻過濾
     df['Buy_LowerBand'] = apply_cooldown(df['Buy_LowerBand_Raw'], cooldown)
     df['Buy_Breakout'] = apply_cooldown(df['Breakout_Raw'], cooldown)
     df['Buy_Pullback'] = apply_cooldown(df['Pullback_Raw'], cooldown)
@@ -429,7 +425,6 @@ with tab1:
         fig.add_trace(go.Scatter(x=df.index, y=df['SMA_60'], line=dict(color='green', width=2), name=f"MA 60  {latest['SMA_60']:.2f}", hoverinfo='skip', showlegend=True), row=1, col=1)
         fig.add_trace(go.Scatter(x=df.index, y=df['Lower_Band'], line=dict(color='rgba(150,150,150,0.5)', width=1, dash='dash'), hoverinfo='skip', showlegend=False), row=1, col=1)
 
-        # 買賣點標籤繪製
         if use_buy_lowerband: fig.add_trace(go.Scatter(x=df[df['Buy_LowerBand']].index, y=df.loc[df['Buy_LowerBand'], 'Low'] - df.loc[df['Buy_LowerBand'], 'ATR_14']*0.4, mode='markers', marker=dict(symbol='triangle-up', size=13, color='darkgreen', line=dict(width=1, color='black')), hoverinfo='skip', showlegend=False), row=1, col=1)
         if use_breakout: fig.add_trace(go.Scatter(x=df[df['Buy_Breakout']].index, y=df.loc[df['Buy_Breakout'], 'Low'] - df.loc[df['Buy_Breakout'], 'ATR_14']*0.8, mode='markers', marker=dict(symbol='triangle-up', size=14, color='magenta', line=dict(width=1, color='black')), hoverinfo='skip', showlegend=False), row=1, col=1)
         if use_pullback: fig.add_trace(go.Scatter(x=df[df['Buy_Pullback']].index, y=df.loc[df['Buy_Pullback'], 'Low'] - df.loc[df['Buy_Pullback'], 'ATR_14']*1.2, mode='markers', marker=dict(symbol='triangle-up', size=13, color='lime', line=dict(width=1, color='black')), hoverinfo='skip', showlegend=False), row=1, col=1)
@@ -540,9 +535,107 @@ with tab2:
         else: st.warning("🥲 查無符合條件之標的。如果您想在盤整區找股票，請嘗試關閉左側的【ADX 趨勢過濾】。")
 
 # ------------------------------------------
-# 分頁三：💰 策略回測實驗室 (準備區)
+# 分頁三：💰 策略回測實驗室
 # ------------------------------------------
-with tab3: st.info("💰 回測實驗室架構建置中，敬請期待下一階段升級...")
+with tab3:
+    st.header("💰 策略回測實驗室")
+    st.markdown("使用您在左側邊欄勾選的【買賣點條件】，針對目前選擇的標的進行過去 5 年的歷史回測。")
+    
+    if 'df' in locals() and not df.empty:
+        col_b1, col_b2 = st.columns(2)
+        with col_b1: init_cash = st.number_input("初始回測本金 (NTD)", value=1000000, step=100000)
+        with col_b2: trade_size = st.slider("單次交易投入資金比例 (%)", min_value=10, max_value=100, value=100, step=10)
+        
+        if st.button("🚀 開始執行歷史回測", type="primary"):
+            with st.spinner("正在運算 5 年交易紀錄..."):
+                df['Backtest_Buy'] = False
+                if use_buy_lowerband: df['Backtest_Buy'] |= df['Buy_LowerBand']
+                if use_breakout: df['Backtest_Buy'] |= df['Buy_Breakout']
+                if use_pullback: df['Backtest_Buy'] |= df['Buy_Pullback']
+                if use_ma_bounce: df['Backtest_Buy'] |= df['Buy_MABounce']
+                if use_5ma_bounce: df['Backtest_Buy'] |= df['Buy_5MABounce']
+
+                df['Backtest_Sell'] = False
+                if use_sell_bb: df['Backtest_Sell'] |= df['Sell_BB']
+                if use_sell_5ma: df['Backtest_Sell'] |= df['Sell_5MA']
+                if use_sell_10ma: df['Backtest_Sell'] |= df['Sell_10MA']
+                if use_sell_kd: df['Backtest_Sell'] |= df['Sell_KD']
+                if use_sell_rsi: df['Backtest_Sell'] |= df['Sell_RSI']
+                if use_sell_macd: df['Backtest_Sell'] |= df['Sell_MACD']
+                if use_sell_ma: df['Backtest_Sell'] |= df['Sell_MA20']
+
+                cash = init_cash
+                shares = 0
+                trades = []
+                equity_curve = []
+                entry_price = 0
+                entry_date = None
+
+                for date, row in df.iterrows():
+                    price = row['Close']
+                    if row['Backtest_Sell'] and shares > 0:
+                        sell_val = shares * price
+                        profit = sell_val - (shares * entry_price)
+                        ret_pct = (price - entry_price) / entry_price * 100
+                        cash += sell_val
+                        trades.append({
+                            '進場日期': entry_date.strftime('%Y-%m-%d'),
+                            '出場日期': date.strftime('%Y-%m-%d'),
+                            '進場價': round(entry_price, 2),
+                            '出場價': round(price, 2),
+                            '股數': shares,
+                            '報酬率 (%)': round(ret_pct, 2),
+                            '獲利金額': round(profit, 0)
+                        })
+                        shares = 0
+
+                    if row['Backtest_Buy'] and shares == 0:
+                        invest_amt = cash * (trade_size / 100.0)
+                        can_buy_shares = int(invest_amt // price)
+                        if can_buy_shares > 0:
+                            cost = can_buy_shares * price
+                            cash -= cost
+                            shares = can_buy_shares
+                            entry_price = price
+                            entry_date = date
+
+                    current_equity = cash + (shares * price)
+                    equity_curve.append(current_equity)
+
+                df['Equity'] = equity_curve
+
+                total_ret = ((df['Equity'].iloc[-1] - init_cash) / init_cash) * 100
+                buy_hold_ret = ((df['Close'].iloc[-1] - df['Close'].iloc[0]) / df['Close'].iloc[0]) * 100
+                
+                if trades:
+                    trades_df = pd.DataFrame(trades)
+                    win_trades = trades_df[trades_df['報酬率 (%)'] > 0]
+                    win_rate = len(win_trades) / len(trades) * 100
+                    
+                    df['Peak'] = df['Equity'].cummax()
+                    df['Drawdown'] = (df['Equity'] - df['Peak']) / df['Peak'] * 100
+                    max_dd = df['Drawdown'].min()
+
+                    st.subheader("📊 回測績效報告")
+                    m1, m2, m3, m4 = st.columns(4)
+                    m1.metric("策略總報酬", f"{total_ret:.2f}%", f"打敗死抱不放: {(total_ret - buy_hold_ret):.2f}%")
+                    m2.metric("勝率 (Win Rate)", f"{win_rate:.1f}%")
+                    m3.metric("總交易次數", f"{len(trades)} 次")
+                    m4.metric("最大回撤 (MDD)", f"{max_dd:.2f}%")
+
+                    fig_eq = go.Figure()
+                    fig_eq.add_trace(go.Scatter(x=df.index, y=df['Equity'], line=dict(color='gold', width=2), name='策略資金曲線'))
+                    buy_hold_curve = (df['Close'] / df['Close'].iloc[0]) * init_cash
+                    fig_eq.add_trace(go.Scatter(x=df.index, y=buy_hold_curve, line=dict(color='gray', dash='dot'), name='死抱不放(基準線)'))
+                    fig_eq.update_layout(title="資金成長曲線對比圖 (Equity Curve)", height=400, hovermode="x unified")
+                    st.plotly_chart(fig_eq, use_container_width=True)
+
+                    st.subheader("📝 逐筆交易明細")
+                    st.dataframe(trades_df, use_container_width=True)
+                else:
+                    st.warning("⚠️ 在這 5 年的期間內，沒有觸發任何完整的買賣交易。請嘗試在左側邊欄放寬您的買賣點條件！")
+    else:
+        st.info("請先在第一頁「📊 區間分析與建倉」中輸入股票代碼並產生圖表後，再來進行回測！")
 
 # ------------------------------------------
 # 分頁四：⚖️ 雲端金庫與大盤儀表板 
