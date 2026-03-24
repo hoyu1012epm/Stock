@@ -136,7 +136,6 @@ def calculate_indicators(df, bbw_f, vol_f, kd_thresh, use_adx, cooldown, bias_li
     cond_value = (df['RSI'] <= 45) & (df['Close'] <= df['SMA_20'] * 1.05) & (df['Close'] >= df['SMA_60'] * 0.85)
     df['Zone_Status'] = np.select([cond_warm, cond_value], ["🔴 升溫區間", "🟢 價值區間"], default="⚪ 空蕩等待")
     
-    # 懸浮資訊與隱形天花板
     df['Hover_Text'] = (
         "開: " + df['Open'].round(2).astype(str) + " 高: " + df['High'].round(2).astype(str) + "<br>" +
         "低: " + df['Low'].round(2).astype(str) + " 收: " + df['Close'].round(2).astype(str) + "<br>" +
@@ -145,6 +144,7 @@ def calculate_indicators(df, bbw_f, vol_f, kd_thresh, use_adx, cooldown, bias_li
         "RSI: " + df['RSI'].round(1).astype(str) + "<br>" +
         "目前水位: <b>" + df['Zone_Status'] + "</b>"
     )
+    
     df['Hover_Y'] = df['High'].rolling(30, center=True, min_periods=1).max() + (df['High'] - df['Low']).ewm(alpha=1/14, adjust=False).mean() * 2.5
     
     df['TR'] = np.maximum(df['High'] - df['Low'], np.maximum(abs(df['High'] - df['Close'].shift(1)), abs(df['Low'] - df['Close'].shift(1))))
@@ -159,7 +159,7 @@ def calculate_indicators(df, bbw_f, vol_f, kd_thresh, use_adx, cooldown, bias_li
     adx_cond = (df['ADX'] > 20) if use_adx else True
     df['Vol_5MA'] = df['Volume'].rolling(5).mean()
     
-    # 買賣點運算
+    # 買賣點
     df['Buy_Breakout'] = apply_cooldown((df['BBW'] <= df['BBW'].rolling(20).min() * bbw_f).rolling(5).max().fillna(0).astype(bool) & (df['Close'] > df['Upper_Band']) & (df['Volume'] > df['Vol_5MA'] * vol_f) & (df['Close'] > df['SMA_60']) & adx_cond, cooldown)
     df['Buy_Pullback'] = apply_cooldown((df['K'] > df['D']) & (df['K'].shift(1) <= df['D'].shift(1)) & (df['K'] <= kd_thresh) & (df['Close'] > df['SMA_60']) & adx_cond, cooldown)
     df['Buy_MABounce'] = apply_cooldown((df['SMA_5'] > df['SMA_20']) & (df['SMA_20'] > df['SMA_60']) & (df['Low'] <= (df['SMA_20'] * 1.015)) & (df['Close'] > df['SMA_20']) & (df['Close'] > df['Open']) & adx_cond, cooldown)
@@ -382,18 +382,30 @@ with tab1:
         st.markdown("---")
         
         # ==========================================
-        # ★ 繪圖區塊
+        # ★ 繪圖區：極速演算法 (區間合併渲染)
         # ==========================================
         ohlc_title = f"開={latest['Open']:.2f} 高={latest['High']:.2f} 低={latest['Low']:.2f} 收={latest['Close']:.2f}  {sign}{diff:.2f} ({sign}{diff_pct:.2f}%)"
         fig = make_subplots(rows=6, cols=1, shared_xaxes=True, vertical_spacing=0.04, row_heights=[0.4, 0.12, 0.12, 0.12, 0.12, 0.12], subplot_titles=(ohlc_title, "成交量", "KD", "MACD", "RSI", "OBV"))
         
+        # 🚀 極速背景色繪製演算法 (連續區間合併)
         if show_zone_bg:
             df['Zone_Num'] = np.where(df['Zone_Status'].str.contains("升溫"), 1, np.where(df['Zone_Status'].str.contains("價值"), -1, 0))
-            for i in range(len(df)):
-                if df['Zone_Num'].iloc[i] == 1: 
-                    fig.add_shape(type="rect", x0=df.index[i]-pd.Timedelta(hours=12), x1=df.index[i]+pd.Timedelta(hours=12), y0=0, y1=1, xref="x", yref="paper", fillcolor="rgba(255, 0, 0, 0.08)", line_width=0, layer="below")
-                elif df['Zone_Num'].iloc[i] == -1: 
-                    fig.add_shape(type="rect", x0=df.index[i]-pd.Timedelta(hours=12), x1=df.index[i]+pd.Timedelta(hours=12), y0=0, y1=1, xref="x", yref="paper", fillcolor="rgba(0, 255, 0, 0.08)", line_width=0, layer="below")
+            current_zone = 0
+            start_date = None
+            
+            for idx, row in df.iterrows():
+                val = row['Zone_Num']
+                if val != current_zone:
+                    if current_zone != 0 and start_date is not None:
+                        color = "rgba(255, 0, 0, 0.08)" if current_zone == 1 else "rgba(0, 255, 0, 0.08)"
+                        fig.add_shape(type="rect", x0=start_date, x1=idx, y0=0, y1=1, xref="x", yref="paper", fillcolor=color, line_width=0, layer="below")
+                    current_zone = val
+                    start_date = idx if val != 0 else None
+            
+            # 處理最後一段尚未結束的區間
+            if current_zone != 0 and start_date is not None:
+                color = "rgba(255, 0, 0, 0.08)" if current_zone == 1 else "rgba(0, 255, 0, 0.08)"
+                fig.add_shape(type="rect", x0=start_date, x1=df.index[-1], y0=0, y1=1, xref="x", yref="paper", fillcolor=color, line_width=0, layer="below")
 
         fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name='K線', increasing_line_color='red', decreasing_line_color='green', showlegend=False, hoverinfo='skip'), row=1, col=1)
         fig.add_trace(go.Scatter(x=df.index, y=df['Hover_Y'], mode='markers', marker=dict(color='rgba(0,0,0,0)', size=1), showlegend=False, customdata=df['Hover_Text'], hovertemplate="<b>日期: %{x|%Y-%m-%d}</b><br>%{customdata}<extra></extra>"), row=1, col=1)
@@ -405,6 +417,7 @@ with tab1:
         fig.add_trace(go.Scatter(x=df.index, y=df['SMA_60'], line=dict(color='green', width=2), name=f"MA 60  {latest['SMA_60']:.2f}", hoverinfo='skip', showlegend=True), row=1, col=1)
         fig.add_trace(go.Scatter(x=df.index, y=df['Lower_Band'], line=dict(color='rgba(150,150,150,0.5)', width=1, dash='dash'), hoverinfo='skip', showlegend=False), row=1, col=1)
 
+        # 買賣點與方塊繪製
         if use_breakout: fig.add_trace(go.Scatter(x=df[df['Buy_Breakout']].index, y=df.loc[df['Buy_Breakout'], 'Low'] - df.loc[df['Buy_Breakout'], 'ATR_14']*0.4, mode='markers', marker=dict(symbol='triangle-up', size=14, color='magenta', line=dict(width=1, color='black')), hoverinfo='skip', showlegend=False), row=1, col=1)
         if use_pullback: fig.add_trace(go.Scatter(x=df[df['Buy_Pullback']].index, y=df.loc[df['Buy_Pullback'], 'Low'] - df.loc[df['Buy_Pullback'], 'ATR_14']*0.8, mode='markers', marker=dict(symbol='triangle-up', size=13, color='lime', line=dict(width=1, color='black')), hoverinfo='skip', showlegend=False), row=1, col=1)
         if use_ma_bounce: fig.add_trace(go.Scatter(x=df[df['Buy_MABounce']].index, y=df.loc[df['Buy_MABounce'], 'Low'] - df.loc[df['Buy_MABounce'], 'ATR_14']*1.2, mode='markers', marker=dict(symbol='triangle-up', size=13, color='dodgerblue', line=dict(width=1, color='black')), hoverinfo='skip', showlegend=False), row=1, col=1)
@@ -463,7 +476,7 @@ with tab1:
         st.warning("⚠️ 找不到該股票代碼，請確認代碼是否正確。")
 
 # ------------------------------------------
-# 分頁二：🚀 策略選股掃描器 (★ 完美修復)
+# 分頁二：🚀 策略選股掃描器 
 # ------------------------------------------
 with tab2:
     st.header("🚀 策略選股掃描器")
@@ -472,12 +485,12 @@ with tab2:
         "🔥 台股前 50 大權值股": "2330.TW, 2317.TW, 2454.TW, 2382.TW, 2308.TW, 2881.TW, 2891.TW, 2412.TW, 2882.TW, 2886.TW, 1216.TW, 2002.TW, 2884.TW, 2892.TW, 2603.TW, 2303.TW, 2885.TW, 3231.TW, 1101.TW, 2890.TW, 2207.TW, 5871.TW, 2880.TW, 2357.TW, 2395.TW, 2883.TW, 3711.TW, 2887.TW, 2301.TW, 4938.TW",
         "🤖 半導體與 AI 概念股 (上市櫃混合)": "2330.TW, 2454.TW, 2303.TW, 2379.TW, 3231.TW, 2382.TW, 3443.TW, 3661.TW, 3034.TW, 6669.TW, 3293.TWO, 8069.TWO, 6488.TW, 2356.TW, 3017.TW, 2376.TW, 3529.TW, 2449.TW",
         "💰 熱門高股息與大盤 ETF": "0050.TW, 0056.TW, 00878.TW, 00919.TW, 00929.TW, 00713.TW, 006208.TW, 00939.TW, 00940.TW, 00733.TW",
-        "🇺🇸 美股科技巨頭": "AAPL, MSFT, GOOGL, AMZN, META, TSLA, NVDA, AMD, TSM, AVGO, INTC",
+        "🇺🇸 美股科技七巨頭 & 晶片股": "AAPL, MSFT, GOOGL, AMZN, META, TSLA, NVDA, AMD, TSM, AVGO, INTC, ASML",
         "✍️ 自訂輸入清單": ""
     }
     selected_pool = st.selectbox("📁 選擇要掃描的股池：", list(market_pools.keys()))
-    if selected_pool == "✍️ 自訂輸入清單": scan_tickers_input = st.text_area("📝 請輸入股票代碼 (以半形逗號分隔)", value="2330.TW, 0050.TW")
-    else: scan_tickers_input = st.text_area("📝 股池內容 (可手動增刪微調)", value=market_pools[selected_pool])
+    if selected_pool == "✍️ 自訂輸入清單": scan_tickers_input = st.text_area("📝 請輸入要掃描的股票代碼 (以半形逗號分隔)", value="2330.TW, 0050.TW")
+    else: scan_tickers_input = st.text_area("📝 目前股池內容 (可手動增刪微調)", value=market_pools[selected_pool])
     
     if st.button("⚡ 開始智慧防擋掃描", type="primary"):
         ticker_list = [t.strip().upper() for t in scan_tickers_input.split(",") if t.strip()]
@@ -486,34 +499,31 @@ with tab2:
         status_text = st.empty()
         
         for i, ticker in enumerate(ticker_list):
-            status_text.text(f"🔍 掃描中: {ticker} ({i+1}/{len(ticker_list)})...")
+            status_text.text(f"🔍 正在掃描: {ticker} ({i+1}/{len(ticker_list)})... 請勿關閉視窗")
             try:
                 df_scan = load_data(ticker, days=150) 
                 if not df_scan.empty:
                     df_scan = calculate_indicators(df_scan, bbw_factor, vol_factor, kd_threshold, use_adx_filter, cooldown_days, safe_bias_limit)
                     latest_day = df_scan.iloc[-1]
                     buy_reasons = []
-                    if use_breakout and latest_day.get('Buy_Breakout', False): buy_reasons.append("突破")
-                    if use_pullback and latest_day.get('Buy_Pullback', False): buy_reasons.append("拉回")
-                    if use_ma_bounce and latest_day.get('Buy_MABounce', False): buy_reasons.append("回踩20MA")
-                    if use_5ma_bounce and latest_day.get('Buy_5MABounce', False): buy_reasons.append("回踩5MA")
+                    if use_breakout and latest_day.get('Buy_Breakout', False): buy_reasons.append("壓縮突破")
+                    if use_pullback and latest_day.get('Buy_Pullback', False): buy_reasons.append("多頭拉回")
+                    if use_ma_bounce and latest_day.get('Buy_MABounce', False): buy_reasons.append("20MA回踩")
+                    if use_5ma_bounce and latest_day.get('Buy_5MABounce', False): buy_reasons.append("5MA回踩")
                     
                     if buy_reasons:
-                        scan_results.append({"股票代碼": ticker, "最新收盤價": round(latest_day['Close'], 2), "今日觸發": " + ".join(buy_reasons), "水位判定": latest_day['Zone_Status']})
+                        scan_results.append({"股票代碼": ticker, "最新收盤價": round(latest_day['Close'], 2), "今日觸發策略": " + ".join(buy_reasons), "趨勢判定": latest_day['Status_Signal'], "RSI (14)": round(latest_day['RSI'], 1), "月線乖離(%)": round(latest_day['Bias_20MA'], 2)})
             except Exception as e: pass
             time.sleep(0.15) 
             progress_bar.progress((i + 1) / len(ticker_list))
             
-        status_text.text("✅ 掃描完成！")
+        status_text.text("✅ 全盤掃描完成！")
         if scan_results:
-            st.success(f"🎉 掃描出 {len(scan_results)} 檔符合策略標的。")
+            st.success(f"🎉 恭喜！在【{selected_pool}】中共掃描出 {len(scan_results)} 檔符合您策略的標的。")
             st.dataframe(pd.DataFrame(scan_results), use_container_width=True)
-        else: st.warning("🥲 查無符合條件之標的。")
+        else: st.warning("🥲 今天這個股池中，沒有任何股票符合您目前的買點設定。")
 
-# ------------------------------------------
-# 分頁三：💰 策略回測實驗室 (準備區)
-# ------------------------------------------
-with tab3: st.info("💰 回測實驗室架構建置中，敬請期待下一階段升級...")
+with tab3: st.info("💰 回測實驗室運作中...")
 
 # ------------------------------------------
 # 分頁四：⚖️ 雲端金庫與大盤儀表板 
