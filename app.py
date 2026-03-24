@@ -134,7 +134,6 @@ def calculate_indicators(df, bbw_f, vol_f, kd_thresh, use_adx, cooldown, bias_li
     conditions = [(df['RSI'] >= 70) | (df['Bias_20MA'] >= bias_limit), (df['RSI'] >= 60) | (df['Bias_20MA'] >= (bias_limit * 0.7)), (df['Close'] < df['SMA_60'])]
     df['Status_Signal'] = np.select(conditions, ["🔴 極度危險", "🟡 留意拉回", "⚫ 空頭趨勢"], default="🟢 安全區間")
     
-    # ★ 將全部 OHLC 資訊打包，交給隱形錨點顯示
     df['Hover_Text'] = (
         "開: " + df['Open'].round(2).astype(str) + " 高: " + df['High'].round(2).astype(str) + "<br>" +
         "低: " + df['Low'].round(2).astype(str) + " 收: " + df['Close'].round(2).astype(str) + "<br>" +
@@ -152,6 +151,9 @@ def calculate_indicators(df, bbw_f, vol_f, kd_thresh, use_adx, cooldown, bias_li
     df['-DI'] = 100 * (df['-DM'].ewm(alpha=1/14, adjust=False).mean() / df['ATR_14'])
     df['DX'] = 100 * abs(df['+DI'] - df['-DI']) / (df['+DI'] + df['-DI'])
     df['ADX'] = df['DX'].ewm(alpha=1/14, adjust=False).mean()
+    
+    # ★ 完美防擋黑科技：動態計算天花板位置 (局部最高點 + 2.5倍 ATR)
+    df['Hover_Y'] = df['High'].rolling(30, center=True, min_periods=1).max() + df['ATR_14'] * 2.5
     
     adx_cond = (df['ADX'] > 20) if use_adx else True
     df['Vol_5MA'] = df['Volume'].rolling(5).mean()
@@ -397,28 +399,28 @@ with tab1:
         st.markdown("---")
         
         # ==========================================
-        # ★ 完美繪圖區：隱形錨點資訊框 + 自由游標
+        # ★ 完美繪圖區：筋斗雲錨點 + 自由游標
         # ==========================================
         ohlc_title = f"開={latest['Open']:.2f} 高={latest['High']:.2f} 低={latest['Low']:.2f} 收={latest['Close']:.2f}  {sign}{diff:.2f} ({sign}{diff_pct:.2f}%)"
         fig = make_subplots(rows=6, cols=1, shared_xaxes=True, vertical_spacing=0.04, row_heights=[0.4, 0.12, 0.12, 0.12, 0.12, 0.12], 
                             subplot_titles=(ohlc_title, "成交量", "KD", "MACD", "RSI", "OBV"))
         
-        # 1. 真實的 K 線 (關閉原生 Hover，避免擋住)
+        # 1. 真實 K 線 (關閉原生 hover，不擋視線)
         fig.add_trace(go.Candlestick(
             x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], 
             name='K線', increasing_line_color='red', decreasing_line_color='green', 
             showlegend=False, hoverinfo='skip'
         ), row=1, col=1)
         
-        # 2. ★ 魔法隱形錨點 (強制把資訊框懸空釘在最高價的頭頂上)
+        # 2. ★ 魔法筋斗雲錨點 (掛在 K 棒頭頂上方 2.5倍 ATR 的位置)
         fig.add_trace(go.Scatter(
-            x=df.index, y=df['High'], 
-            mode='markers', marker=dict(color='rgba(0,0,0,0)', size=2), # 隱形
+            x=df.index, y=df['Hover_Y'], 
+            mode='markers', marker=dict(color='rgba(0,0,0,0)', size=1), # 完全隱形
             showlegend=False, customdata=df['Hover_Text'], 
             hovertemplate="<b>日期: %{x|%Y-%m-%d}</b><br>%{customdata}<extra></extra>"
         ), row=1, col=1)
         
-        # 3. 各種均線
+        # 3. 均線與布林通道
         fig.add_trace(go.Scatter(x=df.index, y=df['Upper_Band'], line=dict(color='rgba(150,150,150,0.5)', width=1, dash='dash'), hoverinfo='skip', showlegend=False), row=1, col=1)
         fig.add_trace(go.Scatter(x=df.index, y=df['SMA_5'], line=dict(color='magenta', width=1.5), name=f"MA 5  {latest['SMA_5']:.2f}", hoverinfo='skip', showlegend=True), row=1, col=1) 
         fig.add_trace(go.Scatter(x=df.index, y=df['SMA_10'], line=dict(color='deepskyblue', width=1.5), name=f"MA 10  {latest['SMA_10']:.2f}", hoverinfo='skip', showlegend=True), row=1, col=1) 
@@ -426,6 +428,7 @@ with tab1:
         fig.add_trace(go.Scatter(x=df.index, y=df['SMA_60'], line=dict(color='green', width=2), name=f"MA 60  {latest['SMA_60']:.2f}", hoverinfo='skip', showlegend=True), row=1, col=1)
         fig.add_trace(go.Scatter(x=df.index, y=df['Lower_Band'], line=dict(color='rgba(150,150,150,0.5)', width=1, dash='dash'), hoverinfo='skip', showlegend=False), row=1, col=1)
 
+        # 4. 買賣點標籤
         if use_breakout: fig.add_trace(go.Scatter(x=df[df['Buy_Breakout']].index, y=df.loc[df['Buy_Breakout'], 'Low'] - df.loc[df['Buy_Breakout'], 'ATR_14']*0.4, mode='markers', marker=dict(symbol='triangle-up', size=14, color='magenta', line=dict(width=1, color='black')), hoverinfo='skip', showlegend=False), row=1, col=1)
         if use_pullback: fig.add_trace(go.Scatter(x=df[df['Buy_Pullback']].index, y=df.loc[df['Buy_Pullback'], 'Low'] - df.loc[df['Buy_Pullback'], 'ATR_14']*0.8, mode='markers', marker=dict(symbol='triangle-up', size=13, color='lime', line=dict(width=1, color='black')), hoverinfo='skip', showlegend=False), row=1, col=1)
         if use_ma_bounce: fig.add_trace(go.Scatter(x=df[df['Buy_MABounce']].index, y=df.loc[df['Buy_MABounce'], 'Low'] - df.loc[df['Buy_MABounce'], 'ATR_14']*1.2, mode='markers', marker=dict(symbol='triangle-up', size=13, color='dodgerblue', line=dict(width=1, color='black')), hoverinfo='skip', showlegend=False), row=1, col=1)
@@ -436,6 +439,7 @@ with tab1:
         if use_sell_macd: fig.add_trace(go.Scatter(x=df[df['Sell_MACD']].index, y=df.loc[df['Sell_MACD'], 'High'] + df.loc[df['Sell_MACD'], 'ATR_14']*1.6, mode='markers', marker=dict(symbol='triangle-down', size=12, color='blue', line=dict(width=1, color='black')), hoverinfo='skip', showlegend=False), row=1, col=1)
         if use_sell_ma: fig.add_trace(go.Scatter(x=df[df['Sell_MA20']].index, y=df.loc[df['Sell_MA20'], 'High'] + df.loc[df['Sell_MA20'], 'ATR_14']*2.0, mode='markers', marker=dict(symbol='triangle-down', size=13, color='black', line=dict(width=1, color='black')), hoverinfo='skip', showlegend=False), row=1, col=1)
 
+        # 5. 獲利方塊透視
         if show_trade_lines:
             df['CBuy'] = False
             if use_breakout: df['CBuy'] |= df['Buy_Breakout']
@@ -460,6 +464,7 @@ with tab1:
                     fig.add_shape(type="rect", x0=ed, y0=ep, x1=df.index[i], y1=xp, fillcolor=fc, line=dict(color=lc, width=2), row=1, col=1)
                     fig.add_annotation(x=df.index[i], y=df['High'].iloc[i] + df['ATR_14'].iloc[i]*2.8, text=f"<b>{xp-ep:.2f} ({ret:.1f}%)</b>", showarrow=True, arrowhead=1, arrowcolor=lc, ax=0, ay=-30, font=dict(color="white", size=11), bgcolor=bg, row=1, col=1)
 
+        # 6. 副圖設定 (皆關閉 hover)
         vol_colors = ['red' if c >= o else 'green' for c, o in zip(df['Close'], df['Open'])]
         fig.add_trace(go.Bar(x=df.index, y=df['Volume'], marker_color=vol_colors, hoverinfo='skip', showlegend=False), row=2, col=1)
         fig.add_trace(go.Scatter(x=df.index, y=df['Vol_5MA'], line=dict(color='orange', dash='dot'), hoverinfo='skip', showlegend=False), row=2, col=1)
@@ -471,7 +476,7 @@ with tab1:
         fig.add_trace(go.Scatter(x=df.index, y=df['RSI'], line=dict(color='darkred'), hoverinfo='skip', showlegend=False), row=5, col=1)
         fig.add_trace(go.Scatter(x=df.index, y=df['OBV'], line=dict(color='teal'), hoverinfo='skip', showlegend=False), row=6, col=1)
         
-        # ★ 完美游標設定：X軸吸附資料，Y軸跟隨滑鼠，hovermode="x" 吸附錨點
+        # ★ 游標設定：X 軸吸附時間(data)，Y 軸跟隨滑鼠(cursor)，完美十字線！
         dt_breaks = [d.strftime("%Y-%m-%d") for d in pd.date_range(start=df.index[0], end=df.index[-1]) if d not in df.index]
         fig.update_xaxes(
             showspikes=True, spikemode='across', spikesnap='data', spikethickness=1, spikedash='dot', spikecolor='gray',
@@ -480,6 +485,8 @@ with tab1:
         fig.update_yaxes(
             showspikes=True, spikemode='across', spikesnap='cursor', spikethickness=1, spikedash='dot', spikecolor='gray'
         )
+        
+        # hovermode="x" 會讓資訊框尋找 X 軸上的資料點，而我們唯一有資料點的就是天花板上的隱形錨點！
         fig.update_layout(
             height=1300, hovermode="x", dragmode='pan', xaxis_rangeslider_visible=False,
             legend=dict(orientation="v", yanchor="top", y=1.0, xanchor="left", x=0.005, bgcolor="rgba(255,255,255,0.7)", font=dict(size=12))
