@@ -8,6 +8,7 @@ import datetime
 import json
 import gspread
 from google.oauth2.service_account import Credentials
+import time
 
 # 1. 網頁基本設定
 st.set_page_config(page_title="專屬量化操盤副駕 | 雙引擎版", layout="wide", initial_sidebar_state="expanded")
@@ -443,28 +444,43 @@ with tab1:
         st.warning("⚠️ 找不到該股票代碼，請確認代碼是否正確。")
 
 # ------------------------------------------
-# 分頁二：🚀 策略選股掃描器 (強勢回歸)
+# 分頁二：🚀 策略選股掃描器 (主題模組與智慧限流版)
 # ------------------------------------------
 with tab2:
     st.header("🚀 策略選股掃描器")
-    st.markdown("系統將依照您左側邊欄勾選的 **【買點設定】**，自動從您的口袋名單中篩選出今天(最新交易日)剛好觸發買訊的股票！")
+    st.markdown("系統將依照您左側邊欄勾選的 **【買點設定】**，自動從各大主題題材庫中，篩選出今天剛好觸發買訊的股票！")
     
-    # 預設 20 大權值股作為範例清單
-    default_tickers = "2330.TW, 2317.TW, 2454.TW, 2382.TW, 2308.TW, 2881.TW, 2891.TW, 2412.TW, 2882.TW, 2886.TW, 1216.TW, 2002.TW, 2884.TW, 2892.TW, 2603.TW, 2303.TW, 2885.TW, 3231.TW, 1101.TW, 2890.TW"
-    scan_tickers_input = st.text_area("📝 請輸入要掃描的股票代碼 (以半形逗號分隔，支援 .TW 或 .TWO)", value=default_tickers)
+    # 1. 內建主題題材庫 (精選有流動性的標的)
+    market_pools = {
+        "🔥 台股前 50 大權值股": "2330.TW, 2317.TW, 2454.TW, 2382.TW, 2308.TW, 2881.TW, 2891.TW, 2412.TW, 2882.TW, 2886.TW, 1216.TW, 2002.TW, 2884.TW, 2892.TW, 2603.TW, 2303.TW, 2885.TW, 3231.TW, 1101.TW, 2890.TW, 2207.TW, 5871.TW, 2880.TW, 2357.TW, 2395.TW, 2883.TW, 3711.TW, 2887.TW, 2301.TW, 4938.TW",
+        "🤖 半導體與 AI 概念股 (上市櫃混合)": "2330.TW, 2454.TW, 2303.TW, 2379.TW, 3231.TW, 2382.TW, 3443.TW, 3661.TW, 3034.TW, 6669.TW, 3293.TWO, 8069.TWO, 6488.TW, 2356.TW, 3017.TW, 2376.TW, 3529.TW, 2449.TW",
+        "💰 熱門高股息與大盤 ETF": "0050.TW, 0056.TW, 00878.TW, 00919.TW, 00929.TW, 00713.TW, 006208.TW, 00939.TW, 00940.TW, 00733.TW",
+        "🇺🇸 美股科技七巨頭 & 晶片股": "AAPL, MSFT, GOOGL, AMZN, META, TSLA, NVDA, AMD, TSM, AVGO, INTC, ASML",
+        "✍️ 自訂輸入清單": ""
+    }
     
-    if st.button("⚡ 開始全盤掃描", type="primary"):
-        ticker_list = [t.strip().upper() for t in scan_tickers_input.split(",")]
+    # 2. UI 介面選擇
+    selected_pool = st.selectbox("📁 選擇要掃描的股池：", list(market_pools.keys()))
+    
+    if selected_pool == "✍️ 自訂輸入清單":
+        scan_tickers_input = st.text_area("📝 請輸入要掃描的股票代碼 (以半形逗號分隔)", value="2330.TW, 0050.TW")
+    else:
+        scan_tickers_input = st.text_area("📝 目前股池內容 (可手動增刪微調)", value=market_pools[selected_pool])
+    
+    # 3. 掃描引擎啟動
+    if st.button("⚡ 開始智慧防擋掃描", type="primary"):
+        ticker_list = [t.strip().upper() for t in scan_tickers_input.split(",") if t.strip()]
         scan_results = []
         
         progress_bar = st.progress(0)
         status_text = st.empty()
         
+        # 建立掃描迴圈
         for i, ticker in enumerate(ticker_list):
-            status_text.text(f"正在掃描: {ticker} ({i+1}/{len(ticker_list)})...")
+            status_text.text(f"🔍 正在掃描: {ticker} ({i+1}/{len(ticker_list)})... 請勿關閉視窗")
             try:
-                # 掃描不需要抓 5 年，抓 200 天夠算季線與 ADX 就好，加速掃描
-                df_scan = load_data(ticker, days=200) 
+                # 掃描不需要抓 5 年，抓 150 天算季線與指標已足夠，大幅節省下載時間
+                df_scan = load_data(ticker, days=150) 
                 if not df_scan.empty:
                     df_scan = calculate_indicators(df_scan, bbw_factor, vol_factor, kd_threshold, use_adx_filter, cooldown_days, safe_bias_limit)
                     latest_day = df_scan.iloc[-1]
@@ -485,19 +501,21 @@ with tab2:
                             "月線乖離(%)": round(latest_day['Bias_20MA'], 2)
                         })
             except Exception as e:
+                # 遇到抓不到資料的股票，安靜地跳過，不要報錯打斷流程
                 pass
+            
+            # ★ 防擋機制：每抓一檔暫停 0.15 秒，模仿人類節奏
+            time.sleep(0.15) 
             progress_bar.progress((i + 1) / len(ticker_list))
             
-        status_text.text("✅ 掃描完成！")
+        status_text.text("✅ 全盤掃描完成！")
         
+        # 4. 顯示結果
         if scan_results:
-            st.success(f"🎉 恭喜！在您的清單中共掃描出 {len(scan_results)} 檔符合【左側策略】的飆股。")
+            st.success(f"🎉 恭喜！在【{selected_pool}】中共掃描出 {len(scan_results)} 檔符合您策略的標的。")
             st.dataframe(pd.DataFrame(scan_results), use_container_width=True)
         else:
-            st.warning("🥲 今天沒有任何股票符合您目前的買點設定，請調整左側參數，或加入更多股票代碼。")
-
-with tab3: st.info("💰 回測實驗室運作中...")
-
+            st.warning("🥲 今天這個股池中，沒有任何股票符合您目前的買點設定。您可以嘗試切換左側流派、放寬參數，或是選擇其他股池掃描。")
 # ------------------------------------------
 # 分頁四：⚖️ 雲端金庫與大盤儀表板 
 # ------------------------------------------
