@@ -107,7 +107,7 @@ def apply_cooldown(signal_series, cooldown_period):
 def calculate_indicators(df, bbw_f, vol_f, kd_thresh, use_adx, cooldown, bias_limit):
     if len(df) < 60: return df 
     df['SMA_5'] = df['Close'].rolling(5).mean()
-    df['SMA_10'] = df['Close'].rolling(10).mean() 
+    df['SMA_10'] = df['Close'].rolling(10).mean()
     df['SMA_20'] = df['Close'].rolling(20).mean()
     df['SMA_60'] = df['Close'].rolling(60).mean()
     df['STD_20'] = df['Close'].rolling(20).std()
@@ -134,8 +134,10 @@ def calculate_indicators(df, bbw_f, vol_f, kd_thresh, use_adx, cooldown, bias_li
     conditions = [(df['RSI'] >= 70) | (df['Bias_20MA'] >= bias_limit), (df['RSI'] >= 60) | (df['Bias_20MA'] >= (bias_limit * 0.7)), (df['Close'] < df['SMA_60'])]
     df['Status_Signal'] = np.select(conditions, ["🔴 極度危險", "🟡 留意拉回", "⚫ 空頭趨勢"], default="🟢 安全區間")
     
-    # ★ 精簡 Hover Text，把 OHLC 交給 hovertemplate 處理
+    # ★ 將全部 OHLC 資訊打包，交給隱形錨點顯示
     df['Hover_Text'] = (
+        "開: " + df['Open'].round(2).astype(str) + " 高: " + df['High'].round(2).astype(str) + "<br>" +
+        "低: " + df['Low'].round(2).astype(str) + " 收: " + df['Close'].round(2).astype(str) + "<br>" +
         "量: " + (df['Volume'] / 1000).astype(int).astype(str) + "K<br>" +
         "20MA乖離: " + df['Bias_20MA'].round(2).astype(str) + "%<br>" +
         "RSI: " + df['RSI'].round(1).astype(str) + "<br>" +
@@ -395,19 +397,28 @@ with tab1:
         st.markdown("---")
         
         # ==========================================
-        # ★ 完美繪圖區：自由 Y 軸、不遮擋資訊框
+        # ★ 完美繪圖區：隱形錨點資訊框 + 自由游標
         # ==========================================
         ohlc_title = f"開={latest['Open']:.2f} 高={latest['High']:.2f} 低={latest['Low']:.2f} 收={latest['Close']:.2f}  {sign}{diff:.2f} ({sign}{diff_pct:.2f}%)"
         fig = make_subplots(rows=6, cols=1, shared_xaxes=True, vertical_spacing=0.04, row_heights=[0.4, 0.12, 0.12, 0.12, 0.12, 0.12], 
                             subplot_titles=(ohlc_title, "成交量", "KD", "MACD", "RSI", "OBV"))
         
-        # ★ 將 OHLC 寫進 hovertemplate，配上極簡 customdata
+        # 1. 真實的 K 線 (關閉原生 Hover，避免擋住)
         fig.add_trace(go.Candlestick(
             x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], 
-            name='K線', showlegend=False, customdata=df['Hover_Text'], 
-            hovertemplate="<b>日期: %{x|%Y-%m-%d}</b><br>開: %{open:.2f} 高: %{high:.2f}<br>低: %{low:.2f} 收: %{close:.2f}<br><br>%{customdata}<extra></extra>"
+            name='K線', increasing_line_color='red', decreasing_line_color='green', 
+            showlegend=False, hoverinfo='skip'
         ), row=1, col=1)
         
+        # 2. ★ 魔法隱形錨點 (強制把資訊框懸空釘在最高價的頭頂上)
+        fig.add_trace(go.Scatter(
+            x=df.index, y=df['High'], 
+            mode='markers', marker=dict(color='rgba(0,0,0,0)', size=2), # 隱形
+            showlegend=False, customdata=df['Hover_Text'], 
+            hovertemplate="<b>日期: %{x|%Y-%m-%d}</b><br>%{customdata}<extra></extra>"
+        ), row=1, col=1)
+        
+        # 3. 各種均線
         fig.add_trace(go.Scatter(x=df.index, y=df['Upper_Band'], line=dict(color='rgba(150,150,150,0.5)', width=1, dash='dash'), hoverinfo='skip', showlegend=False), row=1, col=1)
         fig.add_trace(go.Scatter(x=df.index, y=df['SMA_5'], line=dict(color='magenta', width=1.5), name=f"MA 5  {latest['SMA_5']:.2f}", hoverinfo='skip', showlegend=True), row=1, col=1) 
         fig.add_trace(go.Scatter(x=df.index, y=df['SMA_10'], line=dict(color='deepskyblue', width=1.5), name=f"MA 10  {latest['SMA_10']:.2f}", hoverinfo='skip', showlegend=True), row=1, col=1) 
@@ -460,9 +471,8 @@ with tab1:
         fig.add_trace(go.Scatter(x=df.index, y=df['RSI'], line=dict(color='darkred'), hoverinfo='skip', showlegend=False), row=5, col=1)
         fig.add_trace(go.Scatter(x=df.index, y=df['OBV'], line=dict(color='teal'), hoverinfo='skip', showlegend=False), row=6, col=1)
         
+        # ★ 完美游標設定：X軸吸附資料，Y軸跟隨滑鼠，hovermode="x" 吸附錨點
         dt_breaks = [d.strftime("%Y-%m-%d") for d in pd.date_range(start=df.index[0], end=df.index[-1]) if d not in df.index]
-        
-        # ★ 完美解法：X 軸吸附資料，Y 軸跟隨滑鼠自由拉動
         fig.update_xaxes(
             showspikes=True, spikemode='across', spikesnap='data', spikethickness=1, spikedash='dot', spikecolor='gray',
             range=[df.index[-1] - pd.Timedelta(days=150), df.index[-1] + pd.Timedelta(days=10)], rangebreaks=[dict(values=dt_breaks)]
@@ -470,8 +480,6 @@ with tab1:
         fig.update_yaxes(
             showspikes=True, spikemode='across', spikesnap='cursor', spikethickness=1, spikedash='dot', spikecolor='gray'
         )
-        
-        # ★ 完美解法：使用 hovermode="x"，資訊框只會黏在 K 棒旁邊，完全不干擾游標的 Y 軸移動
         fig.update_layout(
             height=1300, hovermode="x", dragmode='pan', xaxis_rangeslider_visible=False,
             legend=dict(orientation="v", yanchor="top", y=1.0, xanchor="left", x=0.005, bgcolor="rgba(255,255,255,0.7)", font=dict(size=12))
