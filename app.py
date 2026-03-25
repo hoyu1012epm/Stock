@@ -264,7 +264,7 @@ st.sidebar.markdown("---")
 st.sidebar.title("⚙️ 圖表與策略控制台")
 show_zone_bg = st.sidebar.checkbox("開啟【三大氣候區間背景色】", value=True)
 show_trade_lines = st.sidebar.checkbox("開啟【歷史持倉獲利方塊】", value=True)
-use_adx_filter = st.sidebar.checkbox("開啟【ADX 趨勢過濾】", value=True)
+use_adx_filter = st.sidebar.checkbox("開啟【ADX 趨勢過濾】(可能會濾掉盤整區買點)", value=True)
 cooldown_days = st.sidebar.slider("訊號冷卻天數", 1, 10, 5)
 safe_bias_limit = st.sidebar.slider("安全乖離率上限 (%)", 1.0, 15.0, 5.0)
 
@@ -535,7 +535,7 @@ with tab2:
         else: st.warning("🥲 查無符合條件之標的。如果您想在盤整區找股票，請嘗試關閉左側的【ADX 趨勢過濾】。")
 
 # ------------------------------------------
-# 分頁三：💰 策略回測實驗室 (★ 分批加碼引擎)
+# 分頁三：💰 策略回測實驗室 (★ 執行流水帳升級)
 # ------------------------------------------
 with tab3:
     st.header("💰 策略回測實驗室")
@@ -572,7 +572,7 @@ with tab3:
     st.markdown("#### ⚙️ 資金與風險參數 (支援分批加碼)")
     col_c1, col_c2, col_c3 = st.columns(3)
     with col_c1: init_cash = st.number_input("初始本金 (NTD)", value=1000000, step=100000)
-    with col_c2: trade_size = st.slider("單筆投入總資金比例 (%)", 10, 100, 30, 10, help="例如設 30%，每次觸發買點就拿總本金的 30% 加碼，直到現金打完。")
+    with col_c2: trade_size = st.slider("單筆投入總資金比例 (%)", 10, 100, 30, 10, help="例如設 10%，每次觸發買點就拿總本金的 10% 加碼，直到現金打完。")
     with col_c3: enable_fees = st.checkbox("計算交易手續費與稅 (0.1425%費 + 0.3%稅)", value=True)
 
     col_r1, col_r2 = st.columns(2)
@@ -611,12 +611,12 @@ with tab3:
                 cash = init_cash
                 shares = 0
                 trades = []
+                execution_log = [] # ★ 新增：逐筆執行流水帳
                 equity_curve = []
                 
-                # 分批加碼的核心變數
-                entry_price = 0.0 # 平均持倉成本
-                total_cost_basis = 0.0 # 總投入資金 (不含手續費的股票價值)
-                entry_date = None # 第一筆進場時間
+                entry_price = 0.0 
+                total_cost_basis = 0.0 
+                entry_date = None 
 
                 for date, row in df_bt.iterrows():
                     price = row['Close']
@@ -630,20 +630,19 @@ with tab3:
                         elif curr_return >= hard_tp:
                             force_exit, exit_reason = True, "🎯 強制停利"
 
-                    # ★ 判斷賣出 (只要有持股，且觸發賣出條件，全部清倉)
+                    # 判斷賣出 (清倉)
                     if (row['Backtest_Sell'] or force_exit) and shares > 0:
                         sell_val_gross = shares * price
                         sell_fee = sell_val_gross * sell_fee_rate
                         sell_val_net = sell_val_gross - sell_fee
                         
-                        # 計算淨利 (賣出淨額 - 總投入現金成本)
-                        # 為了簡化，總投入現金成本 = total_cost_basis * (1 + buy_fee_rate)
                         total_invested_cash = total_cost_basis * (1 + buy_fee_rate)
                         profit = sell_val_net - total_invested_cash
                         ret_pct = (profit / total_invested_cash) * 100
                         
                         cash += sell_val_net
                         
+                        # 紀錄整趟交易結果
                         trades.append({
                             '首次進場日期': entry_date.strftime('%Y-%m-%d'),
                             '清倉日期': date.strftime('%Y-%m-%d'),
@@ -655,17 +654,25 @@ with tab3:
                             '淨獲利(扣費後)': round(profit, 0)
                         })
                         
-                        # 清空倉位狀態
+                        # ★ 紀錄單筆執行流水帳 (賣出)
+                        execution_log.append({
+                            '日期': date.strftime('%Y-%m-%d'),
+                            '動作': '🔴 清倉賣出',
+                            '成交價': round(price, 2),
+                            '成交股數': shares,
+                            '收付金額': round(sell_val_net, 0),
+                            '說明': exit_reason if force_exit else "技術指標出場"
+                        })
+                        
                         shares = 0
                         entry_price = 0.0
                         total_cost_basis = 0.0
                         entry_date = None
 
-                    # ★ 判斷買進 (解除空手限制，只要有錢就買)
+                    # 判斷買進 (分批)
                     if row['Backtest_Buy'] and cash > 0:
-                        # 計算單筆要投入的金額
                         target_invest = init_cash * (trade_size / 100.0)
-                        actual_invest = min(target_invest, cash) # 如果現金不夠，就全下
+                        actual_invest = min(target_invest, cash) 
                         
                         can_buy_shares = int(actual_invest // (price * (1 + buy_fee_rate)))
                         
@@ -673,16 +680,24 @@ with tab3:
                             cost_gross = can_buy_shares * price
                             buy_fee = cost_gross * buy_fee_rate
                             
-                            # 更新持倉與平均成本
                             total_cost_basis += cost_gross
                             shares += can_buy_shares
-                            entry_price = total_cost_basis / shares # 計算攤平後的平均成本
+                            entry_price = total_cost_basis / shares 
                             
                             cash -= (cost_gross + buy_fee)
                             
-                            # 如果是這輪交易的第一筆，記錄進場日期
                             if entry_date is None:
                                 entry_date = date
+                                
+                            # ★ 紀錄單筆執行流水帳 (買進)
+                            execution_log.append({
+                                '日期': date.strftime('%Y-%m-%d'),
+                                '動作': '🟢 分批買進',
+                                '成交價': round(price, 2),
+                                '成交股數': can_buy_shares,
+                                '收付金額': -round((cost_gross + buy_fee), 0),
+                                '說明': f"動用約 {trade_size}% 資金"
+                            })
 
                     current_equity = cash + (shares * price)
                     equity_curve.append(current_equity)
@@ -722,8 +737,13 @@ with tab3:
                     fig_eq.update_layout(title="資金成長曲線對比 (含手續費與分批加碼)", height=450, hovermode="x unified")
                     st.plotly_chart(fig_eq, use_container_width=True)
 
-                    st.subheader("📝 逐趟交易明細 (已整合分批建倉均價)")
+                    st.subheader("📝 逐趟交易彙總 (看整趟賺多少)")
                     st.dataframe(trades_df, use_container_width=True)
+                    
+                    # ★ 新增：可展開的逐筆流水帳
+                    with st.expander("🔍 展開查看：逐筆建倉與出場流水帳 (Execution Log)"):
+                        st.dataframe(pd.DataFrame(execution_log), use_container_width=True)
+                        
                 else:
                     m3.metric("🏆 策略勝率", "0.0%", "交易 0 次")
                     m4.metric("📉 資金最大回撤 (MDD)", "0.00%")
