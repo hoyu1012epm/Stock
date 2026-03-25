@@ -89,8 +89,14 @@ def get_stock_name(ticker):
     except: return ticker
 
 @st.cache_data(ttl=3600)
-def load_data(ticker, days=1825): 
-    df = yf.download(ticker, start=datetime.datetime.now() - datetime.timedelta(days=days), end=datetime.datetime.now(), progress=False)
+def load_data(ticker, days=1825, start_date=None, end_date=None): 
+    if start_date and end_date:
+        # 如果有指定日期，加上緩衝天數以計算長天期均線(如60MA)
+        fetch_start = pd.to_datetime(start_date) - pd.Timedelta(days=120)
+        df = yf.download(ticker, start=fetch_start, end=pd.to_datetime(end_date)+pd.Timedelta(days=1), progress=False)
+    else:
+        df = yf.download(ticker, start=datetime.datetime.now() - datetime.timedelta(days=days), end=datetime.datetime.now(), progress=False)
+    
     if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
     if not df.empty: df.index = pd.to_datetime(df.index).tz_localize(None)
     return df
@@ -259,7 +265,7 @@ st.sidebar.markdown("---")
 st.sidebar.title("⚙️ 圖表與策略控制台")
 show_zone_bg = st.sidebar.checkbox("開啟【三大氣候區間背景色】", value=True)
 show_trade_lines = st.sidebar.checkbox("開啟【歷史持倉獲利方塊】", value=True)
-use_adx_filter = st.sidebar.checkbox("開啟【ADX 趨勢過濾】(可能會濾掉盤整區買點)", value=True)
+use_adx_filter = st.sidebar.checkbox("開啟【ADX 趨勢過濾】", value=True)
 cooldown_days = st.sidebar.slider("訊號冷卻天數", 1, 10, 5)
 safe_bias_limit = st.sidebar.slider("安全乖離率上限 (%)", 1.0, 15.0, 5.0)
 
@@ -294,8 +300,8 @@ tab1, tab2, tab3, tab4 = st.tabs(["📊 區間分析與建倉", "🚀 策略選�
 # ------------------------------------------
 with tab1:
     col_s1, col_s2 = st.columns([1, 3])
-    with col_s1: market_type = st.selectbox("🌍 市場別", ["上市 (.TW)", "上櫃 (.TWO)", "美股/自訂 (無)"])
-    with col_s2: stock_num = st.text_input("🔍 請輸入股票代號 (例：2330)", value="AAPL") 
+    with col_s1: market_type = st.selectbox("🌍 市場別", ["上市 (.TW)", "上櫃 (.TWO)", "美股/自訂 (無)"], key="t1_mkt")
+    with col_s2: stock_num = st.text_input("🔍 請輸入股票代號 (例：2330)", value="AAPL", key="t1_tkr") 
     
     if "上市" in market_type: suffix = ".TW"
     elif "上櫃" in market_type: suffix = ".TWO"
@@ -311,7 +317,6 @@ with tab1:
         latest, prev = df.iloc[-1], df.iloc[-2]
         
         st.markdown("### 🧮 區間存股資金配速器")
-        
         total_equity = st.session_state["cash_balance"] + st.session_state.total_mkt_val
         target_pct = st.session_state.market_scores['total'] / 100.0
         current_pct = st.session_state.total_mkt_val / total_equity if total_equity > 0 else 0
@@ -323,7 +328,6 @@ with tab1:
             recommended_shares = 0
         else:
             st.info(f"💡 **大盤允許投入資金：** 約 **${gap_amt:,.0f}** (佔總資金 {gap_pct*100:.1f}%)。")
-            
             zone = latest['Zone_Status']
             entry_price = latest['Close']
             
@@ -395,9 +399,6 @@ with tab1:
         with col4: st.markdown(f"**區間判定**<br><span style='font-size:18px'>{latest['Zone_Status']}</span>", unsafe_allow_html=True)
         st.markdown("---")
         
-        # ==========================================
-        # ★ 繪圖區塊
-        # ==========================================
         ohlc_title = f"開={latest['Open']:.2f} 高={latest['High']:.2f} 低={latest['Low']:.2f} 收={latest['Close']:.2f}  {sign}{diff:.2f} ({sign}{diff_pct:.2f}%)"
         fig = make_subplots(rows=6, cols=1, shared_xaxes=True, vertical_spacing=0.04, row_heights=[0.4, 0.12, 0.12, 0.12, 0.12, 0.12], subplot_titles=(ohlc_title, "成交量", "KD", "MACD", "RSI", "OBV"))
         
@@ -535,34 +536,87 @@ with tab2:
         else: st.warning("🥲 查無符合條件之標的。如果您想在盤整區找股票，請嘗試關閉左側的【ADX 趨勢過濾】。")
 
 # ------------------------------------------
-# 分頁三：💰 策略回測實驗室
+# 分頁三：💰 策略回測實驗室 (★ 全新升級)
 # ------------------------------------------
 with tab3:
     st.header("💰 策略回測實驗室")
-    st.markdown("使用您在左側邊欄勾選的【買賣點條件】，針對目前選擇的標的進行過去 5 年的歷史回測。")
+    st.markdown("使用左側邊欄的【買賣點條件】，並疊加交易成本與風險控管，驗證策略在不同市場環境下的真實績效。")
     
-    if 'df' in locals() and not df.empty:
-        col_b1, col_b2 = st.columns(2)
-        with col_b1: init_cash = st.number_input("初始回測本金 (NTD)", value=1000000, step=100000)
-        with col_b2: trade_size = st.slider("單次交易投入資金比例 (%)", min_value=10, max_value=100, value=100, step=10)
-        
-        if st.button("🚀 開始執行歷史回測", type="primary"):
-            with st.spinner("正在運算 5 年交易紀錄..."):
-                df['Backtest_Buy'] = False
-                if use_buy_lowerband: df['Backtest_Buy'] |= df['Buy_LowerBand']
-                if use_breakout: df['Backtest_Buy'] |= df['Buy_Breakout']
-                if use_pullback: df['Backtest_Buy'] |= df['Buy_Pullback']
-                if use_ma_bounce: df['Backtest_Buy'] |= df['Buy_MABounce']
-                if use_5ma_bounce: df['Backtest_Buy'] |= df['Buy_5MABounce']
+    # ★ 1. 獨立標的與市場選擇
+    col_b1, col_b2 = st.columns([1, 3])
+    with col_b1: backtest_market = st.selectbox("🌍 回測市場", ["上市 (.TW)", "上櫃 (.TWO)", "美股/自訂 (無)"], key="bt_mkt")
+    with col_b2: backtest_ticker_input = st.text_input("🔍 請輸入回測股票代號 (例：2330)", value="2330", key="bt_tkr")
+    
+    if "上市" in backtest_market: bt_suffix = ".TW"
+    elif "上櫃" in backtest_market: bt_suffix = ".TWO"
+    else: bt_suffix = ""
+    bt_ticker = f"{backtest_ticker_input.strip()}{bt_suffix}".upper()
+    
+    # ★ 2. 回測時間區間選擇 (包含牛熊市)
+    st.markdown("#### 📅 選擇回測期間")
+    period_option = st.selectbox("選擇歷史區間或極端行情", [
+        "近 1 年", "近 2 年", "近 3 年", "近 5 年", 
+        "🔥 2020-2021 (疫情大牛市)", 
+        "🐻 2022 (升息大熊市)", 
+        "🚀 2023-2024 (AI 狂牛市)", 
+        "✍️ 自訂日期區間"
+    ])
+    
+    bt_start, bt_end, bt_days = None, None, 365
+    if period_option == "近 1 年": bt_days = 365
+    elif period_option == "近 2 年": bt_days = 730
+    elif period_option == "近 3 年": bt_days = 1095
+    elif period_option == "近 5 年": bt_days = 1825
+    elif period_option == "🔥 2020-2021 (疫情大牛市)": bt_start, bt_end = "2020-01-01", "2021-12-31"
+    elif period_option == "🐻 2022 (升息大熊市)": bt_start, bt_end = "2022-01-01", "2022-12-31"
+    elif period_option == "🚀 2023-2024 (AI 狂牛市)": bt_start, bt_end = "2023-01-01", "2024-12-31"
+    elif period_option == "✍️ 自訂日期區間":
+        c_start, c_end = st.columns(2)
+        with c_start: bt_start = st.date_input("開始日期", datetime.date(2022, 1, 1)).strftime("%Y-%m-%d")
+        with c_end: bt_end = st.date_input("結束日期", datetime.date.today()).strftime("%Y-%m-%d")
+    
+    st.markdown("#### ⚙️ 資金與風險參數")
+    col_c1, col_c2, col_c3 = st.columns(3)
+    with col_c1: init_cash = st.number_input("初始本金 (NTD)", value=1000000, step=100000)
+    with col_c2: trade_size = st.slider("單筆投入總資金比例 (%)", 10, 100, 100, 10)
+    with col_c3: enable_fees = st.checkbox("計算交易手續費與稅 (0.1425%費 + 0.3%稅)", value=True)
 
-                df['Backtest_Sell'] = False
-                if use_sell_bb: df['Backtest_Sell'] |= df['Sell_BB']
-                if use_sell_5ma: df['Backtest_Sell'] |= df['Sell_5MA']
-                if use_sell_10ma: df['Backtest_Sell'] |= df['Sell_10MA']
-                if use_sell_kd: df['Backtest_Sell'] |= df['Sell_KD']
-                if use_sell_rsi: df['Backtest_Sell'] |= df['Sell_RSI']
-                if use_sell_macd: df['Backtest_Sell'] |= df['Sell_MACD']
-                if use_sell_ma: df['Backtest_Sell'] |= df['Sell_MA20']
+    col_r1, col_r2 = st.columns(2)
+    with col_r1: hard_sl = st.slider("🛡️ 強制停損死線 (%)", 1.0, 20.0, 10.0, 1.0, help="帳面虧損達此%數，無視指標一律市價砍出")
+    with col_r2: hard_tp = st.slider("🎯 強制停利保險 (%)", 5.0, 100.0, 50.0, 5.0, help="帳面獲利達此%數，強制落袋為安")
+
+    if st.button("🚀 開始執行歷史回測", type="primary", use_container_width=True):
+        with st.spinner(f"正在下載 {bt_ticker} 並運算回測數據..."):
+            
+            # 下載指定期間資料
+            if bt_start and bt_end: df_bt = load_data(bt_ticker, start_date=bt_start, end_date=bt_end)
+            else: df_bt = load_data(bt_ticker, days=bt_days)
+                
+            if df_bt.empty:
+                st.error("⚠️ 無法取得該股票的歷史資料，請確認代碼是否正確。")
+            else:
+                df_bt = calculate_indicators(df_bt, bbw_factor, vol_factor, kd_threshold, use_adx_filter, cooldown_days, safe_bias_limit)
+                
+                # 統整買賣點
+                df_bt['Backtest_Buy'] = False
+                if use_buy_lowerband: df_bt['Backtest_Buy'] |= df_bt['Buy_LowerBand']
+                if use_breakout: df_bt['Backtest_Buy'] |= df_bt['Buy_Breakout']
+                if use_pullback: df_bt['Backtest_Buy'] |= df_bt['Buy_Pullback']
+                if use_ma_bounce: df_bt['Backtest_Buy'] |= df_bt['Buy_MABounce']
+                if use_5ma_bounce: df_bt['Backtest_Buy'] |= df_bt['Buy_5MABounce']
+
+                df_bt['Backtest_Sell'] = False
+                if use_sell_bb: df_bt['Backtest_Sell'] |= df_bt['Sell_BB']
+                if use_sell_5ma: df_bt['Backtest_Sell'] |= df_bt['Sell_5MA']
+                if use_sell_10ma: df_bt['Backtest_Sell'] |= df_bt['Sell_10MA']
+                if use_sell_kd: df_bt['Backtest_Sell'] |= df_bt['Sell_KD']
+                if use_sell_rsi: df_bt['Backtest_Sell'] |= df_bt['Sell_RSI']
+                if use_sell_macd: df_bt['Backtest_Sell'] |= df_bt['Sell_MACD']
+                if use_sell_ma: df_bt['Backtest_Sell'] |= df_bt['Sell_MA20']
+
+                # 費用率設定
+                buy_fee_rate = 0.001425 if enable_fees else 0.0
+                sell_fee_rate = (0.001425 + 0.003) if enable_fees else 0.0
 
                 cash = init_cash
                 shares = 0
@@ -571,71 +625,105 @@ with tab3:
                 entry_price = 0
                 entry_date = None
 
-                for date, row in df.iterrows():
+                # 模擬迴圈
+                for date, row in df_bt.iterrows():
                     price = row['Close']
-                    if row['Backtest_Sell'] and shares > 0:
-                        sell_val = shares * price
-                        profit = sell_val - (shares * entry_price)
-                        ret_pct = (price - entry_price) / entry_price * 100
-                        cash += sell_val
+                    
+                    # 判斷是否觸發強制停損停利 (必須要在持有部位時)
+                    force_exit = False
+                    exit_reason = ""
+                    if shares > 0:
+                        curr_return = (price - entry_price) / entry_price * 100
+                        if curr_return <= -hard_sl:
+                            force_exit, exit_reason = True, "🛡️ 強制停損"
+                        elif curr_return >= hard_tp:
+                            force_exit, exit_reason = True, "🎯 強制停利"
+
+                    # 判斷賣出 (策略賣出 或 強制出場)
+                    if (row['Backtest_Sell'] or force_exit) and shares > 0:
+                        sell_val_gross = shares * price
+                        sell_fee = sell_val_gross * sell_fee_rate
+                        sell_val_net = sell_val_gross - sell_fee
+                        
+                        total_cost = (shares * entry_price) * (1 + buy_fee_rate)
+                        profit = sell_val_net - total_cost
+                        ret_pct = (profit / total_cost) * 100
+                        
+                        cash += sell_val_net
+                        
                         trades.append({
                             '進場日期': entry_date.strftime('%Y-%m-%d'),
                             '出場日期': date.strftime('%Y-%m-%d'),
                             '進場價': round(entry_price, 2),
                             '出場價': round(price, 2),
                             '股數': shares,
-                            '報酬率 (%)': round(ret_pct, 2),
-                            '獲利金額': round(profit, 0)
+                            '出場原因': exit_reason if force_exit else "技術指標",
+                            '淨報酬率 (%)': round(ret_pct, 2),
+                            '淨獲利(扣費後)': round(profit, 0)
                         })
                         shares = 0
 
+                    # 判斷買進
                     if row['Backtest_Buy'] and shares == 0:
                         invest_amt = cash * (trade_size / 100.0)
-                        can_buy_shares = int(invest_amt // price)
+                        can_buy_shares = int((invest_amt) // (price * (1 + buy_fee_rate)))
+                        
                         if can_buy_shares > 0:
-                            cost = can_buy_shares * price
-                            cash -= cost
+                            cost_gross = can_buy_shares * price
+                            buy_fee = cost_gross * buy_fee_rate
+                            cash -= (cost_gross + buy_fee)
                             shares = can_buy_shares
                             entry_price = price
                             entry_date = date
 
+                    # 紀錄資金曲線
                     current_equity = cash + (shares * price)
                     equity_curve.append(current_equity)
 
-                df['Equity'] = equity_curve
+                df_bt['Equity'] = equity_curve
 
-                total_ret = ((df['Equity'].iloc[-1] - init_cash) / init_cash) * 100
-                buy_hold_ret = ((df['Close'].iloc[-1] - df['Close'].iloc[0]) / df['Close'].iloc[0]) * 100
+                # 績效結算
+                total_ret = ((df_bt['Equity'].iloc[-1] - init_cash) / init_cash) * 100
+                buy_hold_shares = int(init_cash // (df_bt['Close'].iloc[0] * (1 + buy_fee_rate)))
+                buy_hold_rem_cash = init_cash - (buy_hold_shares * df_bt['Close'].iloc[0] * (1 + buy_fee_rate))
+                buy_hold_final_val = (buy_hold_shares * df_bt['Close'].iloc[-1] * (1 - sell_fee_rate)) + buy_hold_rem_cash
+                buy_hold_ret = ((buy_hold_final_val - init_cash) / init_cash) * 100
+                
+                st.markdown("---")
+                st.subheader(f"📊 回測績效報告：{get_stock_name(bt_ticker)} ({bt_ticker})")
+                
+                m1, m2, m3, m4 = st.columns(4)
+                m1.metric("🤖 策略總淨報酬", f"{total_ret:.2f}%", f"打敗無腦存股: {(total_ret - buy_hold_ret):.2f}%")
+                m2.metric("📈 無腦存股總報酬", f"{buy_hold_ret:.2f}%")
                 
                 if trades:
                     trades_df = pd.DataFrame(trades)
-                    win_trades = trades_df[trades_df['報酬率 (%)'] > 0]
+                    win_trades = trades_df[trades_df['淨報酬率 (%)'] > 0]
                     win_rate = len(win_trades) / len(trades) * 100
                     
-                    df['Peak'] = df['Equity'].cummax()
-                    df['Drawdown'] = (df['Equity'] - df['Peak']) / df['Peak'] * 100
-                    max_dd = df['Drawdown'].min()
+                    df_bt['Peak'] = df_bt['Equity'].cummax()
+                    df_bt['Drawdown'] = (df_bt['Equity'] - df_bt['Peak']) / df_bt['Peak'] * 100
+                    max_dd = df_bt['Drawdown'].min()
 
-                    st.subheader("📊 回測績效報告")
-                    m1, m2, m3, m4 = st.columns(4)
-                    m1.metric("策略總報酬", f"{total_ret:.2f}%", f"打敗死抱不放: {(total_ret - buy_hold_ret):.2f}%")
-                    m2.metric("勝率 (Win Rate)", f"{win_rate:.1f}%")
-                    m3.metric("總交易次數", f"{len(trades)} 次")
-                    m4.metric("最大回撤 (MDD)", f"{max_dd:.2f}%")
+                    m3.metric("🏆 策略勝率", f"{win_rate:.1f}%", f"交易 {len(trades)} 次")
+                    m4.metric("📉 資金最大回撤 (MDD)", f"{max_dd:.2f}%")
 
                     fig_eq = go.Figure()
-                    fig_eq.add_trace(go.Scatter(x=df.index, y=df['Equity'], line=dict(color='gold', width=2), name='策略資金曲線'))
-                    buy_hold_curve = (df['Close'] / df['Close'].iloc[0]) * init_cash
-                    fig_eq.add_trace(go.Scatter(x=df.index, y=buy_hold_curve, line=dict(color='gray', dash='dot'), name='死抱不放(基準線)'))
-                    fig_eq.update_layout(title="資金成長曲線對比圖 (Equity Curve)", height=400, hovermode="x unified")
+                    fig_eq.add_trace(go.Scatter(x=df_bt.index, y=df_bt['Equity'], line=dict(color='gold', width=2.5), name='AI策略資金曲線'))
+                    
+                    # 畫出存股基準線
+                    bh_curve = (buy_hold_shares * df_bt['Close']) + buy_hold_rem_cash
+                    fig_eq.add_trace(go.Scatter(x=df_bt.index, y=bh_curve, line=dict(color='gray', dash='dot'), name='大盤基準線 (Buy & Hold)'))
+                    
+                    fig_eq.update_layout(title="資金成長曲線對比 (含手續費與稅)", height=450, hovermode="x unified")
                     st.plotly_chart(fig_eq, use_container_width=True)
 
                     st.subheader("📝 逐筆交易明細")
                     st.dataframe(trades_df, use_container_width=True)
                 else:
-                    st.warning("⚠️ 在這 5 年的期間內，沒有觸發任何完整的買賣交易。請嘗試在左側邊欄放寬您的買賣點條件！")
-    else:
-        st.info("請先在第一頁「📊 區間分析與建倉」中輸入股票代碼並產生圖表後，再來進行回測！")
+                    m3.metric("🏆 策略勝率", "0.0%", "交易 0 次")
+                    m4.metric("📉 資金最大回撤 (MDD)", "0.00%")
+                    st.warning("⚠️ 在這段期間內，沒有觸發任何買賣。這代表你的條件可能太嚴苛，建議放寬左側的技術指標限制！")
 
 # ------------------------------------------
 # 分頁四：⚖️ 雲端金庫與大盤儀表板 
