@@ -100,7 +100,6 @@ def load_data(ticker, days=1825, start_date=None, end_date=None):
     if not df.empty: df.index = pd.to_datetime(df.index).tz_localize(None)
     return df
 
-# ★ 回測不再使用Cooldown，改用區間狀態
 def calculate_indicators(df):
     if len(df) < 60: return df 
     df['SMA_5'] = df['Close'].rolling(5).mean()
@@ -114,6 +113,7 @@ def calculate_indicators(df):
     delta = df['Close'].diff()
     rs = delta.clip(lower=0).ewm(com=13, adjust=False).mean() / (-1 * delta.clip(upper=0)).ewm(com=13, adjust=False).mean()
     df['RSI'] = 100 - (100 / (1 + rs))
+    df['Bias_20MA'] = (df['Close'] - df['SMA_20']) / df['SMA_20'] * 100
     
     # ★ 核心區間定義 (Green/Red/White)
     cond_warm = (df['RSI'] >= 70) | (df['High'] >= df['Upper_Band'])
@@ -124,9 +124,12 @@ def calculate_indicators(df):
     df['Zone_Status'] = np.select([cond_warm, cond_value], ["🔴 升溫區間", "🟢 價值區間"], default="⚪ 空蕩等待")
     
     df['Hover_Text'] = (
-        "收: " + df['Close'].round(2).astype(str) + "<br>" +
+        "開: " + df['Open'].round(2).astype(str) + " 高: " + df['High'].round(2).astype(str) + "<br>" +
+        "低: " + df['Low'].round(2).astype(str) + " 收: " + df['Close'].round(2).astype(str) + "<br>" +
+        "量: " + (df['Volume'] / 1000).astype(int).astype(str) + "K<br>" +
+        "20MA乖離: " + df['Bias_20MA'].round(2).astype(str) + "%<br>" +
         "RSI: " + df['RSI'].round(1).astype(str) + "<br>" +
-        "狀態: <b>" + df['Zone_Status'] + "</b>"
+        "目前水位: <b>" + df['Zone_Status'] + "</b>"
     )
     df['Hover_Y'] = df['High'].rolling(30, center=True, min_periods=1).max()
     return df
@@ -181,7 +184,7 @@ def sync_global_data():
         st.session_state.market_fetched = True
 
 # ==========================================
-# ⚙️ 左側邊欄設定 (★ 大幅簡化，因回測不再使用技術指標符號)
+# ⚙️ 左側邊欄設定
 # ==========================================
 st.sidebar.title(f"👤 歡迎回來，{st.session_state['username']}！")
 st.sidebar.metric("🏦 雲端可用現金", f"${st.session_state['cash_balance']:,.0f}")
@@ -200,11 +203,9 @@ st.sidebar.markdown("---")
 sidebar_trade_container = st.sidebar.container()
 st.sidebar.markdown("---")
 
-# 控制台只保留圖表顯示控制
 st.sidebar.title("⚙️ 圖表控制台")
 show_zone_bg = st.sidebar.checkbox("開啟【三大氣候區間背景色】", value=True)
 
-# ★ 下單匣不需要推薦股數，因改為區間自動抄底
 with sidebar_trade_container:
     st.markdown("### ✍️ 專屬下單匣")
     with st.form("manual_trade_form"):
@@ -251,7 +252,6 @@ with tab1:
         df = calculate_indicators(df_raw.copy())
         latest = df.iloc[-1]
         
-        # 戰情室簡化
         st.markdown(f"### 🛡️ 今日戰情 (日期: {latest.name.strftime('%Y-%m-%d')})")
         col1, col2, col3 = st.columns(3)
         col1.metric("最新收盤價", f"{latest['Close']:.2f}")
@@ -259,7 +259,6 @@ with tab1:
         col3.markdown(f"**區間判定**<br><span style='font-size:24px; font-weight:bold;'>{latest['Zone_Status']}</span>", unsafe_allow_html=True)
         st.markdown("---")
         
-        # 繪圖區塊 (★ 取消所有小三角形，只留K線與背景色)
         fig = go.Figure()
         
         if show_zone_bg:
@@ -276,7 +275,6 @@ with tab1:
                 fig.add_shape(type="rect", x0=start_date, x1=df.index[-1], y0=0, y1=1, xref="x", yref="paper", fillcolor=color, line_width=0, layer="below")
 
         fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name='K線', increasing_line_color='red', decreasing_line_color='green', showlegend=False, hoverinfo='skip'))
-        # 隱形Hover層
         fig.add_trace(go.Scatter(x=df.index, y=df['Hover_Y'], mode='markers', marker=dict(color='rgba(0,0,0,0)', size=1), showlegend=False, customdata=df['Hover_Text'], hovertemplate="<b>日期: %{x|%Y-%m-%d}</b><br>%{customdata}<extra></extra>"))
         
         fig.add_trace(go.Scatter(x=df.index, y=df['SMA_20'], line=dict(color='blue', width=1.5), name="MA 20", hoverinfo='skip'))
@@ -290,9 +288,9 @@ with tab1:
         st.warning("⚠️ 請確認股票代碼。")
 
 # ------------------------------------------
-# 分頁二：💰 區間回測實驗室 (★ 核心邏輯重寫版)
+# 分頁二：💰 區間回測實驗室 (★ 修正 bt_suffix 錯誤)
 # ------------------------------------------
-with tab3:
+with tab2:
     st.header("💰 區間存股回測實驗室 (綠底買、紅底賣)")
     st.markdown("本回測完全依據畫面的 **【🟢 價值區間】買進** 與 **【🔴 升溫區間】賣出**。徹底捨棄短線技術指標訊號。")
     
@@ -300,7 +298,12 @@ with tab3:
     with col_b1: backtest_market = st.selectbox("🌍 市場別", ["上市 (.TW)", "上櫃 (.TWO)", "美股/自訂 (無)"], key="bt_mkt")
     with col_b2: backtest_ticker_input = st.text_input("🔍 請輸入股票代號", value="2330", key="bt_tkr")
     
-    bt_ticker = f"{backtest_ticker_input.strip()}{bt_suffix}".upper() # bt_suffix 沿用 tab1 邏輯
+    # ★ 完美修復 bt_suffix 變數未定義的問題
+    if "上市" in backtest_market: bt_suffix = ".TW"
+    elif "上櫃" in backtest_market: bt_suffix = ".TWO"
+    else: bt_suffix = ""
+    
+    bt_ticker = f"{backtest_ticker_input.strip()}{bt_suffix}".upper() 
     
     st.markdown("#### 📅 選擇回測期間")
     period_option = st.selectbox("選擇歷史區間", ["近 3 年", "近 5 年", "🐻 2022 (熊市防禦測試)", "✍️ 自訂日期區間"])
@@ -327,10 +330,8 @@ with tab3:
                 
             if df_bt.empty: st.error("⚠️ 無法取得資料。")
             else:
-                # 使用簡化版指標運算，只算區間
                 df_bt = calculate_indicators(df_bt)
                 
-                # 成本率
                 buy_fee_rate = 0.001425 if enable_fees else 0.0
                 sell_fee_rate = (0.001425 + 0.003) if enable_fees else 0.0
 
@@ -346,9 +347,8 @@ with tab3:
 
                 for date, row in df_bt.iterrows():
                     price = row['Close']
-                    zone_code = row['Zone_Code'] # Red=1, Green=-1, White=0
+                    zone_code = row['Zone_Code'] 
 
-                    # ★ 新。區間賣出邏輯 (只要有持股，遇到紅區就清倉)
                     if zone_code == 1 and shares > 0:
                         sell_val_gross = shares * price
                         sell_fee = sell_val_gross * sell_fee_rate
@@ -360,18 +360,13 @@ with tab3:
                         
                         cash += sell_val_net
                         
-                        # 流水帳
                         execution_log.append({'日期': date.strftime('%Y-%m-%d'), '動作': '🔴 紅區清倉', '成交價': round(price, 2), '股數': shares, '金額': round(sell_val_net, 0), '說明': '進入升溫區間'})
-                        
-                        # 趟數結算
                         trades.append({'首次買進': entry_date_first.strftime('%Y-%m-%d'), '清倉日期': date.strftime('%Y-%m-%d'), '均價': round(entry_price_avg, 2), '賣價': round(price, 2), '股數': shares, '淨報酬%': round(ret_pct, 2)})
                         
-                        # 重置狀態
                         shares = 0; entry_price_avg = 0.0; total_cost_basis = 0.0; entry_date_first = None
 
-                    # ★ 新。區間買進邏輯 (只要在綠區，且有錢，就每天加碼)
                     elif zone_code == -1 and cash > 0:
-                        budget = init_cash * (trade_size / 100.0) # 拿總本金的 X% 買
+                        budget = init_cash * (trade_size / 100.0) 
                         can_spend = min(budget, cash)
                         
                         can_buy_shares = int(can_spend // (price * (1 + buy_fee_rate)))
@@ -382,20 +377,17 @@ with tab3:
                             
                             if entry_date_first is None: entry_date_first = date
                             
-                            # 更新攤平均價
                             total_cost_basis += cost_gross
                             shares += can_buy_shares
                             entry_price_avg = total_cost_basis / shares 
                             
                             execution_log.append({'日期': date.strftime('%Y-%m-%d'), '動作': '🟢 綠區抄底', '成交價': round(price, 2), '股數': can_buy_shares, '金額': -round(cost_gross * (1+buy_fee_rate), 0), '說明': f'價值抄底加碼'})
 
-                    # 白區 holding，不用寫程式
                     current_equity = cash + (shares * price)
                     equity_curve.append(current_equity)
 
                 df_bt['Equity'] = equity_curve
 
-                # ★ 基準線重設計：同步改為「回測區間第一天」 All-in 買進並抱到尾 (Buy & Hold)
                 buy_hold_shares = int(init_cash // (df_bt['Close'].iloc[0] * (1 + buy_fee_rate)))
                 bh_rem_cash = init_cash - (buy_hold_shares * df_bt['Close'].iloc[0] * (1 + buy_fee_rate))
                 bh_final_val = (buy_hold_shares * df_bt['Close'].iloc[-1] * (1 - sell_fee_rate)) + bh_rem_cash
@@ -407,7 +399,7 @@ with tab3:
                 st.subheader(f"📊 區間回測報告：{bt_ticker}")
                 
                 m1, m2 = st.columns(2)
-                m1.metric("🤖 區間存股策略總淨報酬", f"{strategy_ret:.2f}%", f"打敗傻傻抱著: {(strategy_ret - bh_ret):.2f}%")
+                m1.metric("🤖 區間存股策略總淨報酬", f"{strategy_ret:.2f}%", f"相差傻傻抱著: {(strategy_ret - bh_ret):.2f}%")
                 m2.metric("📈 傻傻抱著參考基準 (Buy & Hold)", f"{bh_ret:.2f}%")
                 
                 if execution_log:
@@ -419,7 +411,6 @@ with tab3:
                     col_r1.metric("🏆 交易趟數", f"{len(trades_df)} 趟")
                     col_r2.metric("📉 策略最大資金回撤 (MDD)", f"{max_dd:.2f}%")
 
-                    # 資金曲線
                     fig_eq = go.Figure()
                     fig_eq.add_trace(go.Scatter(x=df_bt.index, y=df_bt['Equity'], line=dict(color='gold', width=2.5), name='區間存股資金曲線'))
                     bh_curve = (buy_hold_shares * df_bt['Close']) + bh_rem_cash
@@ -433,12 +424,11 @@ with tab3:
                     st.warning("⚠️ 此區間無觸發買賣。")
 
 # ------------------------------------------
-# 分頁三：⚖️ 金庫儀表板 (★ 簡化)
+# 分頁三：⚖️ 金庫儀表板
 # ------------------------------------------
-with tab3: # 因移除選股 scanner，分頁變為 3 個
+with tab3: 
     st.header("⚖️ 雲端金庫 ＆ 大盤儀表板")
     if st.session_state.market_fetched:
-        # 大盤儀表板沿用舊邏輯
         ms = st.session_state.market_scores
         def get_color(val, max_val): return "limegreen" if val >= max_val * 0.8 else ("crimson" if val <= max_val * 0.4 else "gold")
         col_g1, col_g2, col_g3, col_g4 = st.columns(4)
