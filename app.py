@@ -41,12 +41,14 @@ def init_connection():
 sh = init_connection()
 
 # ==========================================
-# 🔐 登入系統與全域變數初始化
+# 🔐 登入系統與全域變數初始化 (★ 完美修復預設值)
 # ==========================================
 if "logged_in" not in st.session_state:
     st.session_state.update({
         "logged_in": False, "username": "", "cash_balance": 0.0, 
-        "market_fetched": False, "market_scores": {'total': 0},
+        "market_fetched": False, 
+        # 給予完整的預設字典，防止儀表板 KeyError
+        "market_scores": {'trend': 0, 'mom': 0, 'bias': 0, 'vix': 0, 'total': 0, 'titles': ["大盤長線趨勢 (40%)", "大盤短線動能 (20%)", "市場乖離冷卻度 (20%)", "VIX 安定度 (20%)"]},
         "user_holdings": pd.DataFrame(), "total_mkt_val": 0
     })
 
@@ -109,7 +111,6 @@ def apply_cooldown(signal_series, cooldown_period):
             last_signal_idx = i
     return clean_signal
 
-# ★ 加入 strict_buy 和 strict_sell 濾網參數
 def calculate_indicators(df, bbw_f, vol_f, kd_thresh, use_adx, cooldown, bias_limit, strict_buy, strict_sell):
     if len(df) < 60: return df 
     df['SMA_5'] = df['Close'].rolling(5).mean()
@@ -164,11 +165,11 @@ def calculate_indicators(df, bbw_f, vol_f, kd_thresh, use_adx, cooldown, bias_li
     adx_cond = (df['ADX'] > 20) if use_adx else True
     df['Vol_5MA'] = df['Volume'].rolling(5).mean()
 
-    # ★ 總司令濾網邏輯套用
+    # 總司令濾網邏輯套用
     buy_filter_cond = ((df['Close'] > df['SMA_60']) | cond_value) if strict_buy else pd.Series(True, index=df.index)
     sell_filter_cond = ((df['Close'] < df['SMA_20']) | cond_warm) if strict_sell else pd.Series(True, index=df.index)
     
-    # 買賣點運算 (必須同時滿足濾網)
+    # 買賣點運算
     df['Buy_LowerBand_Raw'] = (df['Low'] <= df['Lower_Band']) & (df['Close'] > df['Open']) & buy_filter_cond
     df['Breakout_Raw'] = (df['BBW'] <= df['BBW'].rolling(20).min() * bbw_f).rolling(5).max().fillna(0).astype(bool) & (df['Close'] > df['Upper_Band']) & (df['Volume'] > df['Vol_5MA'] * vol_f) & (df['Close'] > df['SMA_60']) & adx_cond & buy_filter_cond
     df['Pullback_Raw'] = (df['K'] > df['D']) & (df['K'].shift(1) <= df['D'].shift(1)) & (df['K'] <= kd_thresh) & (df['Close'] > df['SMA_60']) & adx_cond & buy_filter_cond
@@ -274,7 +275,6 @@ use_adx_filter = st.sidebar.checkbox("開啟【ADX 趨勢過濾】", value=True)
 cooldown_days = st.sidebar.slider("訊號冷卻天數", 1, 10, 5)
 safe_bias_limit = 5.0 
 
-# ★ 新增總司令濾網開關
 st.sidebar.markdown("---")
 st.sidebar.subheader("🛡️ 總司令絕對濾網 (大幅降低假訊號)")
 strict_buy_filter = st.sidebar.checkbox("🟢 買進嚴格過濾 (限多頭或極度超跌才准買)", value=True, help="即使下方買點觸發，若不在60MA之上或價值區間，系統將強制沒收買權。")
@@ -544,14 +544,14 @@ with tab2:
         if scan_results:
             st.success(f"🎉 掃描出 {len(scan_results)} 檔符合策略標的。")
             st.dataframe(pd.DataFrame(scan_results), use_container_width=True)
-        else: st.warning("🥲 查無符合條件之標的。若想在盤整區找股票，請嘗試關閉左側的濾網限制。")
+        else: st.warning("🥲 查無符合條件之標的。如果您想在盤整區找股票，請嘗試關閉左側的【ADX 趨勢過濾】。")
 
 # ------------------------------------------
-# 分頁三：💰 策略回測實驗室 (★ 執行流水帳升級)
+# 分頁三：💰 策略回測實驗室
 # ------------------------------------------
 with tab3:
-    st.header("💰 策略回測實驗室")
-    st.markdown("使用左側邊欄的【買賣點條件】，並疊加交易成本與風險控管，驗證策略在不同市場環境下的真實績效。")
+    st.header("💰 策略回測實驗室 (總司令濾網版)")
+    st.markdown("使用左側邊欄的【買賣點條件】與【總司令濾網】，疊加分批加碼，驗證策略的真實績效。")
     
     col_b1, col_b2 = st.columns([1, 3])
     with col_b1: backtest_market = st.selectbox("🌍 回測市場", ["上市 (.TW)", "上櫃 (.TWO)", "美股/自訂 (無)"], key="bt_mkt")
@@ -623,7 +623,7 @@ with tab3:
                 cash = init_cash
                 shares = 0
                 trades = []
-                execution_log = [] # ★ 逐筆執行流水帳
+                execution_log = [] 
                 equity_curve = []
                 
                 entry_price = 0.0 
@@ -642,7 +642,6 @@ with tab3:
                         elif curr_return >= hard_tp:
                             force_exit, exit_reason = True, "🎯 強制停利"
 
-                    # 判斷賣出 (清倉)
                     if (row['Backtest_Sell'] or force_exit) and shares > 0:
                         sell_val_gross = shares * price
                         sell_fee = sell_val_gross * sell_fee_rate
@@ -654,7 +653,6 @@ with tab3:
                         
                         cash += sell_val_net
                         
-                        # 紀錄整趟交易結果
                         trades.append({
                             '首次進場日期': entry_date.strftime('%Y-%m-%d'),
                             '清倉日期': date.strftime('%Y-%m-%d'),
@@ -666,7 +664,6 @@ with tab3:
                             '淨獲利(扣費後)': round(profit, 0)
                         })
                         
-                        # 紀錄單筆執行流水帳 (賣出)
                         execution_log.append({
                             '日期': date.strftime('%Y-%m-%d'),
                             '動作': '🔴 清倉賣出',
@@ -681,7 +678,6 @@ with tab3:
                         total_cost_basis = 0.0
                         entry_date = None
 
-                    # 判斷買進 (分批)
                     if row['Backtest_Buy'] and cash > 0:
                         target_invest = init_cash * (trade_size / 100.0)
                         actual_invest = min(target_invest, cash) 
@@ -701,7 +697,6 @@ with tab3:
                             if entry_date is None:
                                 entry_date = date
                                 
-                            # 紀錄單筆執行流水帳 (買進)
                             execution_log.append({
                                 '日期': date.strftime('%Y-%m-%d'),
                                 '動作': '🟢 分批買進',
