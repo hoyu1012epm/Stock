@@ -25,14 +25,22 @@ def init_connection():
         creds = Credentials.from_service_account_info(creds_json, scopes=scopes)
         client = gspread.authorize(creds)
         sh = client.open("Stock_Database")
+        
         try: ws_users = sh.worksheet("Users")
         except:
             ws_users = sh.add_worksheet(title="Users", rows="100", cols="5")
             ws_users.append_row(["Username", "Password", "Initial_Capital", "Cash_Balance"])
+            
         try: ws_holdings = sh.worksheet("Holdings")
         except:
             ws_holdings = sh.add_worksheet(title="Holdings", rows="1000", cols="6")
             ws_holdings.append_row(["Username", "Ticker", "Shares", "Entry_Price", "Total_Cost", "Buy_Date"])
+            
+        try: ws_watchlist = sh.worksheet("Watchlist")
+        except:
+            ws_watchlist = sh.add_worksheet(title="Watchlist", rows="100", cols="2")
+            ws_watchlist.append_row(["Username", "Tickers"])
+            
         return sh
     except Exception as e:
         st.error(f"🚨 資料庫連線失敗！錯誤代碼: {e}")
@@ -41,15 +49,15 @@ def init_connection():
 sh = init_connection()
 
 # ==========================================
-# 🔐 登入系統與全域變數初始化 (★ 完美修復預設值)
+# 🔐 登入系統與全域變數初始化 
 # ==========================================
 if "logged_in" not in st.session_state:
     st.session_state.update({
         "logged_in": False, "username": "", "cash_balance": 0.0, 
         "market_fetched": False, 
-        # 給予完整的預設字典，防止儀表板 KeyError
         "market_scores": {'trend': 0, 'mom': 0, 'bias': 0, 'vix': 0, 'total': 0, 'titles': ["大盤長線趨勢 (40%)", "大盤短線動能 (20%)", "市場乖離冷卻度 (20%)", "VIX 安定度 (20%)"]},
-        "user_holdings": pd.DataFrame(), "total_mkt_val": 0
+        "user_holdings": pd.DataFrame(), "total_mkt_val": 0,
+        "cloud_watchlist": ""  # 雲端清單預留空間
     })
 
 if not st.session_state["logged_in"]:
@@ -165,11 +173,9 @@ def calculate_indicators(df, bbw_f, vol_f, kd_thresh, use_adx, cooldown, bias_li
     adx_cond = (df['ADX'] > 20) if use_adx else True
     df['Vol_5MA'] = df['Volume'].rolling(5).mean()
 
-    # 總司令濾網邏輯套用
     buy_filter_cond = ((df['Close'] > df['SMA_60']) | cond_value) if strict_buy else pd.Series(True, index=df.index)
     sell_filter_cond = ((df['Close'] < df['SMA_20']) | cond_warm) if strict_sell else pd.Series(True, index=df.index)
     
-    # 買賣點運算
     df['Buy_LowerBand_Raw'] = (df['Low'] <= df['Lower_Band']) & (df['Close'] > df['Open']) & buy_filter_cond
     df['Breakout_Raw'] = (df['BBW'] <= df['BBW'].rolling(20).min() * bbw_f).rolling(5).max().fillna(0).astype(bool) & (df['Close'] > df['Upper_Band']) & (df['Volume'] > df['Vol_5MA'] * vol_f) & (df['Close'] > df['SMA_60']) & adx_cond & buy_filter_cond
     df['Pullback_Raw'] = (df['K'] > df['D']) & (df['K'].shift(1) <= df['D'].shift(1)) & (df['K'] <= kd_thresh) & (df['Close'] > df['SMA_60']) & adx_cond & buy_filter_cond
@@ -246,6 +252,15 @@ def sync_global_data():
             st.session_state.user_holdings = uh; st.session_state.total_mkt_val = total_mkt_val
         else:
             st.session_state.user_holdings = pd.DataFrame(); st.session_state.total_mkt_val = 0
+
+        # 同步 Google Sheet 裡的 Watchlist
+        ws_watchlist = sh.worksheet("Watchlist")
+        df_watch = pd.DataFrame(ws_watchlist.get_all_records())
+        if not df_watch.empty and 'Username' in df_watch.columns:
+            u_df = df_watch[df_watch['Username'] == st.session_state["username"]]
+            if not u_df.empty:
+                st.session_state.cloud_watchlist = str(u_df.iloc[0]['Tickers'])
+                
         st.session_state.market_fetched = True
 
 # ==========================================
@@ -503,17 +518,36 @@ with tab1:
 with tab2:
     st.header("🚀 策略選股掃描器")
     st.markdown("系統將依照您左側邊欄勾選的 **【買點設定】**，自動從各大主題題材庫中，篩選出今天剛好觸發買訊的股票！")
+    
     market_pools = {
+        "☁️ 雲端專屬清單 (由 Google Sheet 同步)": st.session_state.get("cloud_watchlist", "2330.TW, 0050.TW"),
         "🔥 台股前 50 大權值股": "2330.TW, 2317.TW, 2454.TW, 2382.TW, 2308.TW, 2881.TW, 2891.TW, 2412.TW, 2882.TW, 2886.TW, 1216.TW, 2002.TW, 2884.TW, 2892.TW, 2603.TW, 2303.TW, 2885.TW, 3231.TW, 1101.TW, 2890.TW, 2207.TW, 5871.TW, 2880.TW, 2357.TW, 2395.TW, 2883.TW, 3711.TW, 2887.TW, 2301.TW, 4938.TW",
         "🤖 半導體與 AI 概念股 (上市櫃混合)": "2330.TW, 2454.TW, 2303.TW, 2379.TW, 3231.TW, 2382.TW, 3443.TW, 3661.TW, 3034.TW, 6669.TW, 3293.TWO, 8069.TWO, 6488.TW, 2356.TW, 3017.TW, 2376.TW, 3529.TW, 2449.TW",
         "💰 熱門高股息與大盤 ETF": "0050.TW, 0056.TW, 00878.TW, 00919.TW, 00929.TW, 00713.TW, 006208.TW, 00939.TW, 00940.TW, 00733.TW",
         "🇺🇸 美股科技巨頭": "AAPL, MSFT, GOOGL, AMZN, META, TSLA, NVDA, AMD, TSM, AVGO, INTC",
         "✍️ 自訂輸入清單": ""
     }
-    selected_pool = st.selectbox("📁 選擇要掃描的股池：", list(market_pools.keys()))
-    if selected_pool == "✍️ 自訂輸入清單": scan_tickers_input = st.text_area("📝 請輸入股票代碼 (以半形逗號分隔)", value="2330.TW, 0050.TW")
-    else: scan_tickers_input = st.text_area("📝 股池內容 (可手動增刪微調)", value=market_pools[selected_pool])
     
+    selected_pool = st.selectbox("📁 選擇要掃描的股池：", list(market_pools.keys()))
+    
+    if selected_pool == "☁️ 雲端專屬清單 (由 Google Sheet 同步)":
+        scan_tickers_input = st.text_area("📝 雲端清單內容 (您也可以直接在此修改，並點擊下方按鈕存回雲端)", value=market_pools[selected_pool])
+        if st.button("💾 儲存清單至 Google Sheet"):
+            with st.spinner("正在寫入 Google Sheet..."):
+                ws_wl = sh.worksheet("Watchlist")
+                df_wl = pd.DataFrame(ws_wl.get_all_records())
+                if not df_wl.empty and st.session_state["username"] in df_wl["Username"].values:
+                    row_idx = df_wl.index[df_wl['Username'] == st.session_state["username"]].tolist()[0] + 2
+                    ws_wl.update_cell(row_idx, 2, scan_tickers_input)
+                else:
+                    ws_wl.append_row([st.session_state["username"], scan_tickers_input])
+                st.session_state.cloud_watchlist = scan_tickers_input
+                st.success("✅ 雲端清單已同步更新！下次登入也會保留這份名單。")
+    elif selected_pool == "✍️ 自訂輸入清單": 
+        scan_tickers_input = st.text_area("📝 請輸入股票代碼 (以半形逗號分隔)", value="2330.TW, 0050.TW")
+    else: 
+        scan_tickers_input = st.text_area("📝 股池內容 (可手動增刪微調)", value=market_pools[selected_pool])
+        
     if st.button("⚡ 開始智慧防擋掃描", type="primary"):
         ticker_list = [t.strip().upper() for t in scan_tickers_input.split(",") if t.strip()]
         scan_results = []
