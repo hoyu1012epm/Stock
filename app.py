@@ -10,6 +10,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 import time
 import requests
+import pytz
 
 # 1. 網頁基本設定
 st.set_page_config(page_title="專屬量化操盤副駕 | 總司令濾網版", layout="wide", initial_sidebar_state="expanded")
@@ -50,10 +51,10 @@ def init_connection():
 sh = init_connection()
 
 # ==========================================
-# 📡 Fugle 即時報價引擎 (直球對決版)
+# 📡 Fugle 即時報價引擎與日期定位模組
 # ==========================================
 # ★ 請務必在這裡貼上你的富果金鑰
-FUGLE_API_KEY = "NjZmMjMxZWMtNjA5Yi00ZDNjLThlYjYtZjU2NzA3Mjc5ODBiIDIzMzg5NzUzLTRhOGEtNGYxNy1iNmI1LWJjZWYyNDJlY2E2Ng=="
+FUGLE_API_KEY = "請在這裡貼上你純淨的富果API_KEY"
 
 def get_realtime_candle_fugle(ticker):
     """透過 Fugle API 抓取零延遲的盤中即時報價"""
@@ -78,6 +79,25 @@ def get_realtime_candle_fugle(ticker):
     except Exception as e:
         pass
     return None
+
+def merge_realtime_candle(df, ticker):
+    """將富果即時報價精準對齊到今天的日期，避免覆蓋到昨天的 K 棒"""
+    realtime_data = get_realtime_candle_fugle(ticker)
+    if realtime_data and not df.empty:
+        # 取得台灣時間的「今天日期」
+        tw_tz = pytz.timezone('Asia/Taipei')
+        today_ts = pd.Timestamp(datetime.datetime.now(tw_tz).date())
+        
+        # 將即時報價寫入「今天」的列。如果 yfinance 還沒產出今天的列，這行會自動「新增」一天！
+        df.loc[today_ts, 'Close'] = realtime_data['Close']
+        df.loc[today_ts, 'High'] = realtime_data['High']
+        df.loc[today_ts, 'Low'] = realtime_data['Low']
+        df.loc[today_ts, 'Open'] = realtime_data['Open']
+        df.loc[today_ts, 'Volume'] = realtime_data['Volume']
+        
+        # 確保日期排序正確
+        df.sort_index(inplace=True)
+    return df
 
 # ==========================================
 # 🔐 登入系統與全域變數初始化 
@@ -371,14 +391,7 @@ with tab1:
         st.markdown(f"## 📊 {stock_name} ({ticker_input})")
         
         # ★★★ 分頁一：即時 K 棒嫁接手術 ★★★
-        realtime_data = get_realtime_candle_fugle(ticker_input)
-        if realtime_data:
-            last_idx = df_raw.index[-1] 
-            df_raw.loc[last_idx, 'Close'] = realtime_data['Close']
-            df_raw.loc[last_idx, 'High'] = realtime_data['High']
-            df_raw.loc[last_idx, 'Low'] = realtime_data['Low']
-            df_raw.loc[last_idx, 'Open'] = realtime_data['Open']
-            df_raw.loc[last_idx, 'Volume'] = realtime_data['Volume']
+        df_raw = merge_realtime_candle(df_raw, ticker_input)
             
         df = calculate_indicators(df_raw.copy(), bbw_factor, vol_factor, kd_threshold, use_adx_filter, cooldown_days, safe_bias_limit, strict_buy_filter, strict_sell_filter)
         latest, prev = df.iloc[-1], df.iloc[-2]
@@ -602,14 +615,7 @@ with tab2:
                 if not df_scan.empty:
                     
                     # ★★★ 分頁二：即時 K 棒嫁接手術 ★★★
-                    realtime_data = get_realtime_candle_fugle(ticker)
-                    if realtime_data:
-                        last_idx = df_scan.index[-1]
-                        df_scan.loc[last_idx, 'Close'] = realtime_data['Close']
-                        df_scan.loc[last_idx, 'High'] = realtime_data['High']
-                        df_scan.loc[last_idx, 'Low'] = realtime_data['Low']
-                        df_scan.loc[last_idx, 'Open'] = realtime_data['Open']
-                        df_scan.loc[last_idx, 'Volume'] = realtime_data['Volume']
+                    df_scan = merge_realtime_candle(df_scan, ticker)
                         
                     df_scan = calculate_indicators(df_scan, bbw_factor, vol_factor, kd_threshold, use_adx_filter, cooldown_days, safe_bias_limit, strict_buy_filter, strict_sell_filter)
                     latest_day = df_scan.iloc[-1]
