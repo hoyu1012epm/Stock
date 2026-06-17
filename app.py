@@ -9,6 +9,7 @@ import json
 import gspread
 from google.oauth2.service_account import Credentials
 import time
+import requests
 
 # 1. 網頁基本設定
 st.set_page_config(page_title="專屬量化操盤副駕 | 總司令濾網版", layout="wide", initial_sidebar_state="expanded")
@@ -49,6 +50,36 @@ def init_connection():
 sh = init_connection()
 
 # ==========================================
+# 📡 Fugle 即時報價引擎 (直球對決版)
+# ==========================================
+# ★ 請務必在這裡貼上你的富果金鑰
+FUGLE_API_KEY = "NjZmMjMxZWMtNjA5Yi00ZDNjLThlYjYtZjU2NzA3Mjc5ODBiIDIzMzg5NzUzLTRhOGEtNGYxNy1iNmI1LWJjZWYyNDJlY2E2Ng=="
+
+def get_realtime_candle_fugle(ticker):
+    """透過 Fugle API 抓取零延遲的盤中即時報價"""
+    symbol = ticker.split('.')[0] 
+    url = f"https://api.fugle.tw/marketdata/v1.0/stock/intraday/quote/{symbol}"
+    headers = {"X-API-KEY": FUGLE_API_KEY}
+    
+    try:
+        res = requests.get(url, headers=headers)
+        if res.status_code == 200:
+            quote = res.json()
+            current_price = quote.get('lastPrice') or quote.get('closePrice') or quote.get('openPrice')
+            
+            if current_price:
+                return {
+                    'Close': float(current_price),
+                    'High': float(quote.get('highPrice', current_price)),
+                    'Low': float(quote.get('lowPrice', current_price)),
+                    'Open': float(quote.get('openPrice', current_price)),
+                    'Volume': float(quote.get('total', {}).get('tradeVolume', 0))
+                }
+    except Exception as e:
+        pass
+    return None
+
+# ==========================================
 # 🔐 登入系統與全域變數初始化 
 # ==========================================
 if "logged_in" not in st.session_state:
@@ -57,7 +88,7 @@ if "logged_in" not in st.session_state:
         "market_fetched": False, 
         "market_scores": {'trend': 0, 'mom': 0, 'bias': 0, 'vix': 0, 'total': 0, 'titles': ["大盤長線趨勢 (40%)", "大盤短線動能 (20%)", "市場乖離冷卻度 (20%)", "VIX 安定度 (20%)"]},
         "user_holdings": pd.DataFrame(), "total_mkt_val": 0,
-        "cloud_watchlist": ""  # 雲端清單預留空間
+        "cloud_watchlist": ""  
     })
 
 if not st.session_state["logged_in"]:
@@ -253,7 +284,6 @@ def sync_global_data():
         else:
             st.session_state.user_holdings = pd.DataFrame(); st.session_state.total_mkt_val = 0
 
-        # 同步 Google Sheet 裡的 Watchlist
         ws_watchlist = sh.worksheet("Watchlist")
         df_watch = pd.DataFrame(ws_watchlist.get_all_records())
         if not df_watch.empty and 'Username' in df_watch.columns:
@@ -292,8 +322,8 @@ safe_bias_limit = 5.0
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("🛡️ 總司令絕對濾網 (大幅降低假訊號)")
-strict_buy_filter = st.sidebar.checkbox("🟢 買進嚴格過濾 (限多頭或極度超跌才准買)", value=True, help="即使下方買點觸發，若不在60MA之上或價值區間，系統將強制沒收買權。")
-strict_sell_filter = st.sidebar.checkbox("🔴 賣出嚴格過濾 (限跌破月線或極度過熱才准賣)", value=True, help="即使下方賣點觸發，若未跌破20MA或未進入過熱區，系統將強制抱緊獲利。")
+strict_buy_filter = st.sidebar.checkbox("🟢 買進嚴格過濾 (限多頭或極度超跌才准買)", value=True)
+strict_sell_filter = st.sidebar.checkbox("🔴 賣出嚴格過濾 (限跌破月線或極度過熱才准賣)", value=True)
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("🎯 戰術買點設定 (只要一個觸發就買)")
@@ -339,6 +369,17 @@ with tab1:
     if not df_raw.empty:
         stock_name = get_stock_name(ticker_input)
         st.markdown(f"## 📊 {stock_name} ({ticker_input})")
+        
+        # ★★★ 分頁一：即時 K 棒嫁接手術 ★★★
+        realtime_data = get_realtime_candle_fugle(ticker_input)
+        if realtime_data:
+            last_idx = df_raw.index[-1] 
+            df_raw.loc[last_idx, 'Close'] = realtime_data['Close']
+            df_raw.loc[last_idx, 'High'] = realtime_data['High']
+            df_raw.loc[last_idx, 'Low'] = realtime_data['Low']
+            df_raw.loc[last_idx, 'Open'] = realtime_data['Open']
+            df_raw.loc[last_idx, 'Volume'] = realtime_data['Volume']
+            
         df = calculate_indicators(df_raw.copy(), bbw_factor, vol_factor, kd_threshold, use_adx_filter, cooldown_days, safe_bias_limit, strict_buy_filter, strict_sell_filter)
         latest, prev = df.iloc[-1], df.iloc[-2]
         
@@ -559,6 +600,17 @@ with tab2:
             try:
                 df_scan = load_data(ticker, days=150) 
                 if not df_scan.empty:
+                    
+                    # ★★★ 分頁二：即時 K 棒嫁接手術 ★★★
+                    realtime_data = get_realtime_candle_fugle(ticker)
+                    if realtime_data:
+                        last_idx = df_scan.index[-1]
+                        df_scan.loc[last_idx, 'Close'] = realtime_data['Close']
+                        df_scan.loc[last_idx, 'High'] = realtime_data['High']
+                        df_scan.loc[last_idx, 'Low'] = realtime_data['Low']
+                        df_scan.loc[last_idx, 'Open'] = realtime_data['Open']
+                        df_scan.loc[last_idx, 'Volume'] = realtime_data['Volume']
+                        
                     df_scan = calculate_indicators(df_scan, bbw_factor, vol_factor, kd_threshold, use_adx_filter, cooldown_days, safe_bias_limit, strict_buy_filter, strict_sell_filter)
                     latest_day = df_scan.iloc[-1]
                     buy_reasons = []
