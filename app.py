@@ -53,7 +53,7 @@ sh = init_connection()
 # ==========================================
 # 📡 Fugle 即時報價引擎與日期定位模組
 # ==========================================
-# ★ 請務必在這裡貼上你的富果金鑰
+# ★ 已為您自動填入富果金鑰
 FUGLE_API_KEY = "NjZmMjMxZWMtNjA5Yi00ZDNjLThlYjYtZjU2NzA3Mjc5ODBiIDIzMzg5NzUzLTRhOGEtNGYxNy1iNmI1LWJjZWYyNDJlY2E2Ng=="
 
 def get_realtime_candle_fugle(ticker):
@@ -84,18 +84,15 @@ def merge_realtime_candle(df, ticker):
     """將富果即時報價精準對齊到今天的日期，避免覆蓋到昨天的 K 棒"""
     realtime_data = get_realtime_candle_fugle(ticker)
     if realtime_data and not df.empty:
-        # 取得台灣時間的「今天日期」
         tw_tz = pytz.timezone('Asia/Taipei')
         today_ts = pd.Timestamp(datetime.datetime.now(tw_tz).date())
         
-        # 將即時報價寫入「今天」的列。如果 yfinance 還沒產出今天的列，這行會自動「新增」一天！
         df.loc[today_ts, 'Close'] = realtime_data['Close']
         df.loc[today_ts, 'High'] = realtime_data['High']
         df.loc[today_ts, 'Low'] = realtime_data['Low']
         df.loc[today_ts, 'Open'] = realtime_data['Open']
         df.loc[today_ts, 'Volume'] = realtime_data['Volume']
         
-        # 確保日期排序正確
         df.sort_index(inplace=True)
     return df
 
@@ -276,11 +273,15 @@ def sync_global_data():
         if not twii.empty:
             twii['SMA_20'] = twii['Close'].rolling(20).mean(); twii['SMA_60'] = twii['Close'].rolling(60).mean()
             tw_last = twii.iloc[-1]; vix_last = vix['Close'].iloc[-1] if not vix.empty else 20
-            bias_60 = ((tw_last['Close'] - tw_last['SMA_60']) / tw_last['SMA_60']) * 100
-            bias_20 = ((tw_last['Close'] - tw_last['SMA_20']) / tw_last['SMA_20']) * 100
+            
+            # 防呆：確保大盤計算不產生 NaN
+            bias_60 = ((tw_last['Close'] - tw_last['SMA_60']) / tw_last['SMA_60']) * 100 if not pd.isna(tw_last['SMA_60']) else 0
+            bias_20 = ((tw_last['Close'] - tw_last['SMA_20']) / tw_last['SMA_20']) * 100 if not pd.isna(tw_last['SMA_20']) else 0
 
-            s_trend = float(np.clip(40 * (bias_60 + 5) / 10, 0, 40)); s_mom = float(np.clip(20 * (bias_20 + 3) / 6, 0, 20))
-            s_bias = float(np.clip(20 - (20 * (bias_20 + 5) / 10), 0, 20)); s_vix = float(np.clip(20 - (20 * (vix_last - 15) / 20), 0, 20))
+            s_trend = float(np.nan_to_num(np.clip(40 * (bias_60 + 5) / 10, 0, 40), nan=0))
+            s_mom = float(np.nan_to_num(np.clip(20 * (bias_20 + 3) / 6, 0, 20), nan=0))
+            s_bias = float(np.nan_to_num(np.clip(20 - (20 * (bias_20 + 5) / 10), 0, 20), nan=0))
+            s_vix = float(np.nan_to_num(np.clip(20 - (20 * (vix_last - 15) / 20), 0, 20), nan=0))
             titles = ["大盤長線趨勢 (40%)", "大盤短線動能 (20%)", "市場乖離冷卻度 (20%)", "VIX 安定度 (20%)"]
 
             st.session_state.market_scores = {'trend': round(s_trend, 1), 'mom': round(s_mom, 1), 'bias': round(s_bias, 1), 'vix': round(s_vix, 1), 'total': round(s_trend + s_mom + s_bias + s_vix, 1), 'titles': titles}
@@ -294,7 +295,11 @@ def sync_global_data():
                 try:
                     hist = yf.Ticker(row['Ticker']).history(period="5d")
                     if not hist.empty:
-                        curr_p = float(hist['Close'].iloc[-1]); mkt_val = curr_p * row['Shares']
+                        curr_p = float(hist['Close'].iloc[-1])
+                        # 防呆：確保庫存股票有抓到有效價格
+                        if pd.isna(curr_p) or curr_p <= 0: curr_p = row['Entry_Price'] 
+                        
+                        mkt_val = curr_p * row['Shares']
                         uh.at[idx, '目前股價'] = round(curr_p, 2); uh.at[idx, '目前市值'] = round(mkt_val, 0)
                         uh.at[idx, '未實現損益 (%)'] = round(((curr_p - row['Entry_Price']) / row['Entry_Price']) * 100, 2)
                         total_mkt_val += mkt_val
@@ -436,16 +441,16 @@ with tab1:
                 today_budget = gap_amt / pacing_days
                 per_stock_budget = today_budget / num_stocks_today
                 
-                # ★ 終極防呆機制：確保有抓到價格，且價格大於 0 才能計算股數
-                if pd.isna(entry_price) or entry_price <= 0:
-                    shares_by_budget = 0
-                    shares_by_risk = 0
-                    st.warning("⚠️ 目前無法取得這檔股票的有效報價，系統暫時無法計算建議買進股數。")
-                else:
+                # ★ 終極防護罩：例外處理 (攔截所有的 NaN 空值錯誤)
+                try:
                     shares_by_budget = int(per_stock_budget // entry_price)
                     risk_amount = total_equity * (risk_pct / 100.0)
                     assumed_risk = entry_price * 0.10 
                     shares_by_risk = int(risk_amount // assumed_risk)
+                except (ValueError, TypeError, ZeroDivisionError):
+                    shares_by_budget = 0
+                    shares_by_risk = 0
+                    st.warning("⚠️ 大盤或個股即時數據異常 (可能包含空值)，系統暫時無法精算配速股數，請手動評估。")
                     
                 max_shares = min(shares_by_budget, shares_by_risk)
                 recommended_shares = int(max_shares * weight)
@@ -458,7 +463,15 @@ with tab1:
             with st.form("manual_trade_form"):
                 manual_ticker = st.text_input("股票代碼", value=ticker_input)
                 manual_shares = st.number_input("買進股數", min_value=1, value=max(1, int(recommended_shares)))
-                manual_price = st.number_input("成交單價", min_value=0.01, value=float(latest['Close']) if not pd.isna(latest['Close']) else 0.01, format="%.2f")
+                
+                # 防呆：確保預設單價不會因為 NaN 而崩潰
+                try:
+                    def_price = float(latest['Close'])
+                    if pd.isna(def_price) or def_price <= 0: def_price = 0.01
+                except:
+                    def_price = 0.01
+                
+                manual_price = st.number_input("成交單價", min_value=0.01, value=def_price, format="%.2f")
                 if st.form_submit_button("🚀 寫入雲端金庫", type="primary", use_container_width=True):
                     actual_cost = manual_shares * manual_price
                     if actual_cost > st.session_state['cash_balance']: st.error(f"🚨 餘額不足！")
