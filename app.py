@@ -54,7 +54,7 @@ sh = init_connection()
 # 📡 Fugle 即時報價引擎與日期定位模組
 # ==========================================
 # ★ 請務必在這裡貼上你的富果金鑰
-FUGLE_API_KEY = "請在這裡貼上你純淨的富果API_KEY"
+FUGLE_API_KEY = "NjZmMjMxZWMtNjA5Yi00ZDNjLThlYjYtZjU2NzA3Mjc5ODBiIDIzMzg5NzUzLTRhOGEtNGYxNy1iNmI1LWJjZWYyNDJlY2E2Ng=="
 
 def get_realtime_candle_fugle(ticker):
     """透過 Fugle API 抓取零延遲的盤中即時報價"""
@@ -435,13 +435,19 @@ with tab1:
 
                 today_budget = gap_amt / pacing_days
                 per_stock_budget = today_budget / num_stocks_today
-                shares_by_budget = int(per_stock_budget // entry_price)
-
-                risk_amount = total_equity * (risk_pct / 100.0)
-                assumed_risk = entry_price * 0.10 
-                shares_by_risk = int(risk_amount // assumed_risk)
-                max_shares = min(shares_by_budget, shares_by_risk)
                 
+                # ★ 終極防呆機制：確保有抓到價格，且價格大於 0 才能計算股數
+                if pd.isna(entry_price) or entry_price <= 0:
+                    shares_by_budget = 0
+                    shares_by_risk = 0
+                    st.warning("⚠️ 目前無法取得這檔股票的有效報價，系統暫時無法計算建議買進股數。")
+                else:
+                    shares_by_budget = int(per_stock_budget // entry_price)
+                    risk_amount = total_equity * (risk_pct / 100.0)
+                    assumed_risk = entry_price * 0.10 
+                    shares_by_risk = int(risk_amount // assumed_risk)
+                    
+                max_shares = min(shares_by_budget, shares_by_risk)
                 recommended_shares = int(max_shares * weight)
                 st.success(f"🛒 **結合區間水位，建議今日買進： {recommended_shares:,.0f} 股**")
             
@@ -452,7 +458,7 @@ with tab1:
             with st.form("manual_trade_form"):
                 manual_ticker = st.text_input("股票代碼", value=ticker_input)
                 manual_shares = st.number_input("買進股數", min_value=1, value=max(1, int(recommended_shares)))
-                manual_price = st.number_input("成交單價", min_value=0.01, value=float(latest['Close']), format="%.2f")
+                manual_price = st.number_input("成交單價", min_value=0.01, value=float(latest['Close']) if not pd.isna(latest['Close']) else 0.01, format="%.2f")
                 if st.form_submit_button("🚀 寫入雲端金庫", type="primary", use_container_width=True):
                     actual_cost = manual_shares * manual_price
                     if actual_cost > st.session_state['cash_balance']: st.error(f"🚨 餘額不足！")
