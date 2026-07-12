@@ -5,3 +5,5 @@ pandas
 numpy
 gspread
 google-auth
+requests
+pytz
