@@ -53,7 +53,6 @@ sh = init_connection()
 # ==========================================
 # 📡 Fugle 即時報價引擎與日期定位模組
 # ==========================================
-# ★ 已為您自動填入富果金鑰
 FUGLE_API_KEY = "NjZmMjMxZWMtNjA5Yi00ZDNjLThlYjYtZjU2NzA3Mjc5ODBiIDIzMzg5NzUzLTRhOGEtNGYxNy1iNmI1LWJjZWYyNDJlY2E2Ng=="
 
 def get_realtime_candle_fugle(ticker):
@@ -270,7 +269,7 @@ def sync_global_data():
         twii = load_data("^TWII", days=100)
         vix = load_data("^VIX", days=30)
         
-        if not twii.empty:
+        if not twii.empty and len(twii) >= 60:
             twii['SMA_20'] = twii['Close'].rolling(20).mean(); twii['SMA_60'] = twii['Close'].rolling(60).mean()
             tw_last = twii.iloc[-1]; vix_last = vix['Close'].iloc[-1] if not vix.empty else 20
             
@@ -296,7 +295,6 @@ def sync_global_data():
                     hist = yf.Ticker(row['Ticker']).history(period="5d")
                     if not hist.empty:
                         curr_p = float(hist['Close'].iloc[-1])
-                        # 防呆：確保庫存股票有抓到有效價格
                         if pd.isna(curr_p) or curr_p <= 0: curr_p = row['Entry_Price'] 
                         
                         mkt_val = curr_p * row['Shares']
@@ -329,7 +327,7 @@ st.sidebar.markdown("---")
 st.sidebar.title("🧠 核心交易流派")
 st.sidebar.success("✅ 目前已切換為：【總司令濾網 + 組合兵器庫】")
 
-if st.sidebar.button("🔄 同步雲端大盤與帳本", type="primary", use_container_width=True):
+if st.sidebar.button("🔄 同步雲端大盤與帳本", type="primary", width="stretch"):
     sync_global_data()
 
 if not st.session_state.market_fetched: sync_global_data()
@@ -391,13 +389,12 @@ with tab1:
     ticker_input = f"{stock_num.strip()}{suffix}".upper()
     df_raw = load_data(ticker_input, days=1825) if stock_num else pd.DataFrame()
     
-    if not df_raw.empty:
+    # ★ 防護罩 1：必須有超過 60 天的資料才能計算
+    if not df_raw.empty and len(df_raw) >= 60:
         stock_name = get_stock_name(ticker_input)
         st.markdown(f"## 📊 {stock_name} ({ticker_input})")
         
-        # ★★★ 分頁一：即時 K 棒嫁接手術 ★★★
         df_raw = merge_realtime_candle(df_raw, ticker_input)
-            
         df = calculate_indicators(df_raw.copy(), bbw_factor, vol_factor, kd_threshold, use_adx_filter, cooldown_days, safe_bias_limit, strict_buy_filter, strict_sell_filter)
         latest, prev = df.iloc[-1], df.iloc[-2]
         
@@ -441,7 +438,6 @@ with tab1:
                 today_budget = gap_amt / pacing_days
                 per_stock_budget = today_budget / num_stocks_today
                 
-                # ★ 終極防護罩：例外處理 (攔截所有的 NaN 空值錯誤)
                 try:
                     shares_by_budget = int(per_stock_budget // entry_price)
                     risk_amount = total_equity * (risk_pct / 100.0)
@@ -464,7 +460,6 @@ with tab1:
                 manual_ticker = st.text_input("股票代碼", value=ticker_input)
                 manual_shares = st.number_input("買進股數", min_value=1, value=max(1, int(recommended_shares)))
                 
-                # 防呆：確保預設單價不會因為 NaN 而崩潰
                 try:
                     def_price = float(latest['Close'])
                     if pd.isna(def_price) or def_price <= 0: def_price = 0.01
@@ -472,7 +467,7 @@ with tab1:
                     def_price = 0.01
                 
                 manual_price = st.number_input("成交單價", min_value=0.01, value=def_price, format="%.2f")
-                if st.form_submit_button("🚀 寫入雲端金庫", type="primary", use_container_width=True):
+                if st.form_submit_button("🚀 寫入雲端金庫", type="primary", width="stretch"):
                     actual_cost = manual_shares * manual_price
                     if actual_cost > st.session_state['cash_balance']: st.error(f"🚨 餘額不足！")
                     else:
@@ -581,9 +576,9 @@ with tab1:
         fig.update_xaxes(showspikes=True, spikemode='across', spikesnap='data', spikethickness=1, spikedash='dot', spikecolor='gray', range=[df.index[-1] - pd.Timedelta(days=150), df.index[-1] + pd.Timedelta(days=10)], rangebreaks=[dict(values=dt_breaks)])
         fig.update_yaxes(showspikes=True, spikemode='across', spikesnap='cursor', spikethickness=1, spikedash='dot', spikecolor='gray')
         fig.update_layout(height=1300, hovermode="x", dragmode='pan', xaxis_rangeslider_visible=False, legend=dict(orientation="v", yanchor="top", y=1.0, xanchor="left", x=0.005, bgcolor="rgba(255,255,255,0.7)", font=dict(size=12)))
-        st.plotly_chart(fig, use_container_width=True, config={'scrollZoom': True})
-    else:
-        st.warning("⚠️ 找不到該股票代碼，請確認代碼是否正確。")
+        st.plotly_chart(fig, width="stretch", config={'scrollZoom': True})
+    elif stock_num:
+        st.warning(f"⚠️ 找不到 {ticker_input} 的有效報價，或歷史資料不足 60 天無法運算。請確認「市場別」是否選對！（例如看美股 AAPL，市場別要選「美股/自訂」）")
 
 # ------------------------------------------
 # 分頁二：🚀 策略選股掃描器 
@@ -621,7 +616,7 @@ with tab2:
     else: 
         scan_tickers_input = st.text_area("📝 股池內容 (可手動增刪微調)", value=market_pools[selected_pool])
         
-    if st.button("⚡ 開始智慧防擋掃描", type="primary"):
+    if st.button("⚡ 開始智慧防擋掃描", type="primary", width="stretch"):
         ticker_list = [t.strip().upper() for t in scan_tickers_input.split(",") if t.strip()]
         scan_results = []
         progress_bar = st.progress(0)
@@ -631,11 +626,9 @@ with tab2:
             status_text.text(f"🔍 掃描中: {ticker} ({i+1}/{len(ticker_list)})...")
             try:
                 df_scan = load_data(ticker, days=150) 
-                if not df_scan.empty:
-                    
-                    # ★★★ 分頁二：即時 K 棒嫁接手術 ★★★
+                # ★ 防護罩 2：掃描器也必須過濾不足 60 天的無效股票
+                if not df_scan.empty and len(df_scan) >= 60:
                     df_scan = merge_realtime_candle(df_scan, ticker)
-                        
                     df_scan = calculate_indicators(df_scan, bbw_factor, vol_factor, kd_threshold, use_adx_filter, cooldown_days, safe_bias_limit, strict_buy_filter, strict_sell_filter)
                     latest_day = df_scan.iloc[-1]
                     buy_reasons = []
@@ -654,7 +647,7 @@ with tab2:
         status_text.text("✅ 掃描完成！")
         if scan_results:
             st.success(f"🎉 掃描出 {len(scan_results)} 檔符合策略標的。")
-            st.dataframe(pd.DataFrame(scan_results), use_container_width=True)
+            st.dataframe(pd.DataFrame(scan_results), width="stretch")
         else: st.warning("🥲 查無符合條件之標的。如果您想在盤整區找股票，請嘗試關閉左側的【ADX 趨勢過濾】。")
 
 # ------------------------------------------
@@ -702,13 +695,14 @@ with tab3:
     with col_r1: hard_sl = st.slider("🛡️ 強制停損死線 (%)", 1.0, 20.0, 10.0, 1.0)
     with col_r2: hard_tp = st.slider("🎯 強制停利保險 (%)", 5.0, 100.0, 50.0, 5.0)
 
-    if st.button("🚀 開始執行歷史回測", type="primary", use_container_width=True):
+    if st.button("🚀 開始執行歷史回測", type="primary", width="stretch"):
         with st.spinner(f"正在下載 {bt_ticker} 並運算回測數據..."):
             if bt_start and bt_end: df_bt = load_data(bt_ticker, start_date=bt_start, end_date=bt_end)
             else: df_bt = load_data(bt_ticker, days=bt_days)
                 
-            if df_bt.empty:
-                st.error("⚠️ 無法取得該股票的歷史資料，請確認代碼是否正確。")
+            # ★ 防護罩 3：回測實驗室過濾異常資料
+            if df_bt.empty or len(df_bt) < 60:
+                st.error("⚠️ 無法取得該股票的歷史資料，或資料不足 60 天無法運算，請確認代碼與市場別是否正確。")
             else:
                 df_bt = calculate_indicators(df_bt, bbw_factor, vol_factor, kd_threshold, use_adx_filter, cooldown_days, safe_bias_limit, strict_buy_filter, strict_sell_filter)
                 
@@ -853,13 +847,13 @@ with tab3:
                     fig_eq.add_trace(go.Scatter(x=df_bt.index, y=bh_curve, line=dict(color='gray', dash='dot'), name='大盤基準線 (Buy & Hold)'))
                     
                     fig_eq.update_layout(title="資金成長曲線對比 (含手續費與分批加碼)", height=450, hovermode="x unified")
-                    st.plotly_chart(fig_eq, use_container_width=True)
+                    st.plotly_chart(fig_eq, width="stretch")
 
                     st.subheader("📝 逐趟交易彙總 (看整趟賺多少)")
-                    st.dataframe(trades_df, use_container_width=True)
+                    st.dataframe(trades_df, width="stretch")
                     
                     with st.expander("🔍 展開查看：逐筆建倉與出場流水帳 (Execution Log)"):
-                        st.dataframe(pd.DataFrame(execution_log), use_container_width=True)
+                        st.dataframe(pd.DataFrame(execution_log), width="stretch")
                         
                 else:
                     m3.metric("🏆 策略勝率", "0.0%", "交易 0 次")
@@ -875,10 +869,10 @@ with tab4:
         ms = st.session_state.market_scores
         def get_color(val, max_val): return "limegreen" if val >= max_val * 0.8 else ("crimson" if val <= max_val * 0.4 else "gold")
         col_g1, col_g2, col_g3, col_g4 = st.columns(4)
-        with col_g1: st.plotly_chart(draw_gauge(ms['trend'], 40, ms['titles'][0], get_color(ms['trend'], 40)), use_container_width=True)
-        with col_g2: st.plotly_chart(draw_gauge(ms['mom'], 20, ms['titles'][1], get_color(ms['mom'], 20)), use_container_width=True)
-        with col_g3: st.plotly_chart(draw_gauge(ms['bias'], 20, ms['titles'][2], get_color(ms['bias'], 20)), use_container_width=True)
-        with col_g4: st.plotly_chart(draw_gauge(ms['vix'], 20, ms['titles'][3], get_color(ms['vix'], 20)), use_container_width=True)
+        with col_g1: st.plotly_chart(draw_gauge(ms['trend'], 40, ms['titles'][0], get_color(ms['trend'], 40)), width="stretch")
+        with col_g2: st.plotly_chart(draw_gauge(ms['mom'], 20, ms['titles'][1], get_color(ms['mom'], 20)), width="stretch")
+        with col_g3: st.plotly_chart(draw_gauge(ms['bias'], 20, ms['titles'][2], get_color(ms['bias'], 20)), width="stretch")
+        with col_g4: st.plotly_chart(draw_gauge(ms['vix'], 20, ms['titles'][3], get_color(ms['vix'], 20)), width="stretch")
         
         total_equity = st.session_state["cash_balance"] + st.session_state.total_mkt_val
         current_pct = (st.session_state.total_mkt_val / total_equity) * 100 if total_equity > 0 else 0
@@ -899,10 +893,10 @@ with tab4:
                 summary['平均成本'] = (summary['Total_Cost'] / summary['Shares']).round(2)
                 summary['目前市值'] = (summary['Shares'] * summary['目前股價']).round(0)
                 summary['未實現損益 (%)'] = (((summary['目前股價'] - summary['平均成本']) / summary['平均成本']) * 100).round(2)
-                st.dataframe(summary[['Ticker', 'Shares', '平均成本', '目前股價', 'Total_Cost', '目前市值', '未實現損益 (%)']], use_container_width=True)
+                st.dataframe(summary[['Ticker', 'Shares', '平均成本', '目前股價', 'Total_Cost', '目前市值', '未實現損益 (%)']], width="stretch")
                 csv_data = summary.to_csv(index=False).encode('utf-8-sig')
             else:
-                st.dataframe(df_h[['Ticker', 'Shares', 'Entry_Price', '目前股價', 'Total_Cost', '目前市值', '未實現損益 (%)', 'Buy_Date']], use_container_width=True)
+                st.dataframe(df_h[['Ticker', 'Shares', 'Entry_Price', '目前股價', 'Total_Cost', '目前市值', '未實現損益 (%)', 'Buy_Date']], width="stretch")
                 csv_data = df_h.to_csv(index=False).encode('utf-8-sig')
             st.download_button("📥 匯出 Excel (CSV)", data=csv_data, file_name="Portfolio.csv", mime="text/csv", type="primary")
         else: st.warning("目前雲端金庫空空如也，請至左側下單匣建倉！")
