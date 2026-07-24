@@ -53,7 +53,9 @@ sh = init_connection()
 # ==========================================
 # 📡 Fugle 即時報價引擎與日期定位模組
 # ==========================================
-FUGLE_API_KEY = "NjZmMjMxZWMtNjA5Yi00ZDNjLThlYjYtZjU2NzA3Mjc5ODBiIDIzMzg5NzUzLTRhOGEtNGYxNy1iNmI1LWJjZWYyNDJlY2E2Ng=="
+# ★ 自動清理多餘的空白字元，確保 API 能順利連通
+RAW_KEY = "NjZmMjMxZWMtNjA5Yi00ZDNjLThlYjYtZjU2NzA3Mjc5ODBiIDIzMzg5NzUzLTRhOGEtNGYxNy1iNmI1LWJjZWYyNDJlY2E2Ng=="
+FUGLE_API_KEY = RAW_KEY.split()[0].strip()
 
 def get_realtime_candle_fugle(ticker):
     """透過 Fugle API 抓取零延遲的盤中即時報價"""
@@ -80,11 +82,14 @@ def get_realtime_candle_fugle(ticker):
     return None
 
 def merge_realtime_candle(df, ticker):
-    """將富果即時報價精準對齊到今天的日期，避免覆蓋到昨天的 K 棒"""
+    """將富果即時報價精準對齊到今天的日期，並進行時間歸零校正"""
     realtime_data = get_realtime_candle_fugle(ticker)
     if realtime_data and not df.empty:
         tw_tz = pytz.timezone('Asia/Taipei')
         today_ts = pd.Timestamp(datetime.datetime.now(tw_tz).date())
+        
+        # 強制把 df.index 所有的「時間」抹除，只留日期
+        df.index = df.index.normalize()
         
         df.loc[today_ts, 'Close'] = realtime_data['Close']
         df.loc[today_ts, 'High'] = realtime_data['High']
@@ -93,6 +98,8 @@ def merge_realtime_candle(df, ticker):
         df.loc[today_ts, 'Volume'] = realtime_data['Volume']
         
         df.sort_index(inplace=True)
+        # 移除任何同一天內重複出現的 K 棒 (保留最新的一根)
+        df = df[~df.index.duplicated(keep='last')]
     return df
 
 # ==========================================
@@ -154,7 +161,10 @@ def load_data(ticker, days=1825, start_date=None, end_date=None):
         df = yf.download(ticker, start=datetime.datetime.now() - datetime.timedelta(days=days), end=datetime.datetime.now(), progress=False)
     
     if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
-    if not df.empty: df.index = pd.to_datetime(df.index).tz_localize(None)
+    if not df.empty: 
+        # 強制時間歸零並移除重複項，避免 YFinance 資料造成畫圖異常
+        df.index = pd.to_datetime(df.index).tz_localize(None).normalize()
+        df = df[~df.index.duplicated(keep='last')]
     return df
 
 def apply_cooldown(signal_series, cooldown_period):
@@ -389,11 +399,11 @@ with tab1:
     ticker_input = f"{stock_num.strip()}{suffix}".upper()
     df_raw = load_data(ticker_input, days=1825) if stock_num else pd.DataFrame()
     
-    # ★ 防護罩 1：必須有超過 60 天的資料才能計算
     if not df_raw.empty and len(df_raw) >= 60:
         stock_name = get_stock_name(ticker_input)
         st.markdown(f"## 📊 {stock_name} ({ticker_input})")
         
+        # ★★★ 分頁一：即時 K 棒嫁接手術與對齊 ★★★
         df_raw = merge_realtime_candle(df_raw, ticker_input)
         df = calculate_indicators(df_raw.copy(), bbw_factor, vol_factor, kd_threshold, use_adx_filter, cooldown_days, safe_bias_limit, strict_buy_filter, strict_sell_filter)
         latest, prev = df.iloc[-1], df.iloc[-2]
@@ -626,9 +636,11 @@ with tab2:
             status_text.text(f"🔍 掃描中: {ticker} ({i+1}/{len(ticker_list)})...")
             try:
                 df_scan = load_data(ticker, days=150) 
-                # ★ 防護罩 2：掃描器也必須過濾不足 60 天的無效股票
                 if not df_scan.empty and len(df_scan) >= 60:
+                    
+                    # ★★★ 分頁二：即時 K 棒嫁接手術與對齊 ★★★
                     df_scan = merge_realtime_candle(df_scan, ticker)
+                        
                     df_scan = calculate_indicators(df_scan, bbw_factor, vol_factor, kd_threshold, use_adx_filter, cooldown_days, safe_bias_limit, strict_buy_filter, strict_sell_filter)
                     latest_day = df_scan.iloc[-1]
                     buy_reasons = []
@@ -700,7 +712,6 @@ with tab3:
             if bt_start and bt_end: df_bt = load_data(bt_ticker, start_date=bt_start, end_date=bt_end)
             else: df_bt = load_data(bt_ticker, days=bt_days)
                 
-            # ★ 防護罩 3：回測實驗室過濾異常資料
             if df_bt.empty or len(df_bt) < 60:
                 st.error("⚠️ 無法取得該股票的歷史資料，或資料不足 60 天無法運算，請確認代碼與市場別是否正確。")
             else:
